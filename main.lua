@@ -1,49 +1,70 @@
 -- ATTACH DEBUGGER --
+-- Captured unconditionally: love.errorhandler below needs it in both modes.
+local defaultErrorHandler = love.errorhandler
+
 if arg[2] == "debug" then
-    require("lldebugger").start();
-    DefaultErrorHandler = love.errorhandler;
+    require("lldebugger").start()
 end
 
--- REQUIRE MODULES --
-Vector2 = require "res.lib.Vector2"
-Workspace = require "res.lib.Workspace"
-CanvasElement = require "res.lib.CanvasElement"
+local ApplicationManager = require "application.ApplicationManager"
+local InputManager = require "application.InputManager"
 
 -- LOVE 2D CALLBACKS --
 function love.load()
-    MainWorkspace = Workspace:new()
-    CanvasElement1 = CanvasElement:new()
-    MainWorkspace:addElement(CanvasElement1)
+    ApplicationManager:load()
+    local UI = require "application.UI.UI"
+
+    UI:showToast("success", "Board saved successfully", { timeout = 1 })
+    UI:showToast("warn", "Board saved successfully", { timeout = 1 })
+    UI:showToast("info", "Board saved successfully", { timeout = 1 })
+    UI:showToast("error", "Board saved successfully", { timeout = 1 })
 end
 
 function love.update(dt)
+    ApplicationManager:update(dt)
 end
 
 function love.draw()
-    MainWorkspace:draw()
+    ApplicationManager:draw()
 end
 
-function love.wheelmoved(x, y)
-    if y > 0 then
-        MainWorkspace:zoomIncrease()
-    elseif y < 0 then
-        MainWorkspace:zoomDecrease()
-    end
+function love.quit()
+    return ApplicationManager:quit()
+end
+
+function love.resize(w, h)
+    ApplicationManager:resize(w, h)
+end
+
+-- Input goes straight to InputManager, which routes it by priority and stops at
+-- the first handler that consumes it.
+function love.keypressed(key, scancode, isrepeat)
+    InputManager:dispatch("keypressed", key, scancode, isrepeat)
+end
+
+function love.keyreleased(key, scancode)
+    InputManager:dispatch("keyreleased", key, scancode)
 end
 
 function love.mousemoved(x, y, dx, dy, istouch)
-    if (not istouch) and love.mouse.isDown(3) then
-        love.mouse.setRelativeMode(true)
-        MainWorkspace:moveOffset(dx, dy)
-    else
-        love.mouse.setRelativeMode(false)
-    end
+    InputManager:dispatch("mousemoved", x, y, dx, dy, istouch)
+end
+
+function love.mousepressed(x, y, button, istouch, presses)
+    InputManager:dispatch("mousepressed", x, y, button, istouch, presses)
+end
+
+function love.mousereleased(x, y, button, istouch, presses)
+    InputManager:dispatch("mousereleased", x, y, button, istouch, presses)
+end
+
+function love.wheelmoved(x, y)
+    InputManager:dispatch("wheelmoved", x, y)
 end
 
 function love.errorhandler(msg)
     if lldebugger then
-        error(msg, 2);
-    else
-        return DefaultErrorHandler(msg);
+        error(msg, 2)
     end
+    return defaultErrorHandler(msg)
 end
