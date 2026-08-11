@@ -10,3 +10,7 @@
 
 # Built Visual Studio Code Extensions
 *.vsix
+
+# Scratch boards saved while running the app from this repo. Real projects are
+# meant to commit their .grimoire files -- this only ignores the ones written here.
+*.grimoire

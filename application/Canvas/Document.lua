@@ -1,5 +1,7 @@
 local Class = require "lib.util.Class"
+local Serialize = require "lib.util.Serialize"
 local History = require "application.Canvas.History"
+local Element = require "application.Canvas.Element"
 local ElementRegistry = require "application.Canvas.ElementRegistry"
 
 -- The board's contents: an ordered list of elements plus the undo history.
@@ -11,6 +13,10 @@ local ElementRegistry = require "application.Canvas.ElementRegistry"
 -- insert/remove are raw mutations. Commands call them; application code should go
 -- through execute() so the change lands on the undo stack.
 local Document = Class.extend()
+
+-- Bumped when the shape of a saved board changes in a way an older build can't read.
+-- Written into every file from day one so there's always something to branch on.
+Document.SCHEMA_VERSION = 1
 
 function Document.new()
     return setmetatable({
@@ -129,6 +135,78 @@ function Document:handleAt(x, y, zoom)
         end
     end
 end
+
+-- ── Persistence ──────────────────────────────────────────────────────────
+
+-- The element list and a schema version, and nothing else. Selection and History are
+-- view state, so they aren't in the file (see CLAUDE.md) -- an opened board starts
+-- with nothing selected and an empty undo stack.
+function Document:toData()
+    -- Marked as an array so an empty board still writes "elements": [].
+    local elements = Serialize.array({})
+    for index, element in ipairs(self.elements) do
+        elements[index] = element:toData()
+    end
+
+    return {
+        version = Document.SCHEMA_VERSION,
+        elements = elements,
+    }
+end
+
+-- Rebuilds a Document from decoded file data.
+--
+-- Returns the document and a (possibly empty) list of warning strings, or nil and a
+-- message if the data can't be read at all. The split matters: a board referencing an
+-- element type this build doesn't have is a warning -- the elements come through
+-- untouched and save back verbatim -- while a duplicate id or a non-numeric
+-- coordinate is a refusal, because guessing would silently lose content.
+function Document.fromData(data)
+    if type(data) ~= "table" then
+        return nil, "file does not contain a board object"
+    end
+    if type(data.version) ~= "number" then
+        return nil, "file is missing a schema version"
+    end
+    if data.version > Document.SCHEMA_VERSION then
+        return nil, ("file uses schema version %s; this build reads up to %d")
+            :format(tostring(data.version), Document.SCHEMA_VERSION)
+    end
+    if data.elements ~= nil and type(data.elements) ~= "table" then
+        return nil, "'elements' is not a list"
+    end
+
+    local document = Document.new()
+    local warnings = {}
+    local reportedTypes = {}
+
+    for index, raw in ipairs(data.elements or {}) do
+        local element, err = Element.fromData(raw)
+        if not element then
+            return nil, ("element %d: %s"):format(index, err)
+        end
+        if document.byId[element.id] then
+            return nil, ("element %d: id %s appears twice"):format(index, element.id)
+        end
+
+        if not ElementRegistry:has(element.type) and not reportedTypes[element.type] then
+            reportedTypes[element.type] = true
+            table.insert(warnings, ("Unknown element type '%s' -- kept as-is"):format(element.type))
+        end
+
+        document:insert(element)
+    end
+
+    return document, warnings
+end
+
+-- An opaque marker for "which sequence of edits this document currently reflects",
+-- used for dirty tracking. See History:getStateToken.
+function Document:getStateToken()
+    return self.history:getStateToken()
+end
+
+-- ── Editing ──────────────────────────────────────────────────────────────
 
 function Document:execute(command)
     return self.history:execute(command, self)

@@ -12,12 +12,6 @@ local InputManager = require "application.InputManager"
 -- LOVE 2D CALLBACKS --
 function love.load()
     ApplicationManager:load()
-    local UI = require "application.UI.UI"
-
-    UI:showToast("success", "Board saved successfully", { timeout = 1 })
-    UI:showToast("warn", "Board saved successfully", { timeout = 1 })
-    UI:showToast("info", "Board saved successfully", { timeout = 1 })
-    UI:showToast("error", "Board saved successfully", { timeout = 1 })
 end
 
 function love.update(dt)
@@ -44,6 +38,14 @@ end
 
 function love.keyreleased(key, scancode)
     InputManager:dispatch("keyreleased", key, scancode)
+end
+
+function love.textinput(text)
+    InputManager:dispatch("textinput", text)
+end
+
+function love.textedited(text, start, length)
+    InputManager:dispatch("textedited", text, start, length)
 end
 
 function love.mousemoved(x, y, dx, dy, istouch)

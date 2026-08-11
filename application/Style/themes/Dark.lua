@@ -24,6 +24,33 @@ return {
         elementBorder  = 0x4A4A52,
         elementTitle   = 0xD4D4D4,
 
+        -- Inline text editing: the field a label turns into while it's being typed
+        -- in, and the caret and selection drawn over it.
+        editFieldSurface = 0x1E1E1E,
+        editFieldBorder  = 0x3B82F6,
+        textCaret        = 0xD4D4D4,
+        textSelection    = { 0x3B82F6, 0.45 },
+
+        -- Modal confirm dialogs: the screen-dimming backdrop, plus three button
+        -- tones -- primary (the recommended action), danger (discarding work), and
+        -- secondary (everything else). Filled rather than flat like the menu bar's
+        -- buttons, so they read as buttons on their own without a bar around them.
+        overlay = { 0x000000, 0.55 },
+
+        dialogPrimary      = 0x3B82F6,
+        dialogPrimaryHover = 0x5B97F7,
+        dialogPrimaryPress = 0x2E6BCC,
+
+        dialogDanger      = 0xE5484D,
+        dialogDangerHover = 0xEC6569,
+        dialogDangerPress = 0xC33338,
+
+        dialogSecondary      = 0x33333A,
+        dialogSecondaryHover = 0x3D3D45,
+        dialogSecondaryPress = 0x28282D,
+
+        dialogButtonText = 0xFFFFFF,
+
         selection     = 0x65a3c2,
         selectionAlt  = 0x85b1c7,
         marqueeFill   = { 0x3B82F6, 0.12 },

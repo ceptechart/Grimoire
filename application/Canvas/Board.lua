@@ -7,11 +7,14 @@ local Selection = require "application.Canvas.Selection"
 local Cursor = require "application.Canvas.Cursor"
 local RectResize = require "application.Canvas.RectResize"
 local ElementRegistry = require "application.Canvas.ElementRegistry"
+local TextEditSession = require "application.Text.TextEditSession"
+local DialogManager = require "application.UI.DialogManager"
 local AddElement = require "application.Canvas.commands.AddElement"
 local MoveElements = require "application.Canvas.commands.MoveElements"
 local ResizeElement = require "application.Canvas.commands.ResizeElement"
 local ReorderElement = require "application.Canvas.commands.ReorderElement"
 local Composite = require "application.Canvas.commands.Composite"
+local SetProps = require "application.Canvas.commands.SetProps"
 
 -- The view and controller over a Document: draws its elements through the canvas
 -- transform, turns pointer input into selection/move/resize edits, and owns the
@@ -26,11 +29,28 @@ local Composite = require "application.Canvas.commands.Composite"
 local Board = {}
 
 ElementRegistry:register(require "application.Canvas.elements.PanelElement")
+ElementRegistry:setFallback(require "application.Canvas.elements.UnknownElement")
 
 local DRAG_BUTTON = 1
 
 -- Reused rather than rebuilt per frame.
 local drawContext = { zoom = 1 }
+
+-- Element text is drawn under the canvas transform, so an inline editor over it has
+-- to measure and hit-test in world coordinates and keep its hairlines one screen
+-- pixel wide as the zoom changes. See TextEditSession.SCREEN for the other half.
+local WORLD_SPACE = {
+    name = "world",
+    toLocal = function(x, y)
+        return Canvas:screenToWorldX(x), Canvas:screenToWorldY(y)
+    end,
+    toScreen = function(x, y)
+        return Canvas:worldToScreenX(x), Canvas:worldToScreenY(y)
+    end,
+    scale = function()
+        return Canvas.zoom
+    end,
+}
 
 local function isShiftDown()
     return love.keyboard.isDown("lshift", "rshift")
@@ -40,6 +60,9 @@ local function isCtrlDown()
     return love.keyboard.isDown("lctrl", "rctrl") or love.keyboard.isDown("lgui", "rgui")
 end
 
+-- Temporary: the startup board is prefilled so there's something to look at and
+-- something to save. Drop it once there's a way to create an element (TODO 2) --
+-- File > New already opens an empty board, which is what a new board should be.
 local function seed(document)
     local titles = { "Design Notes", "Enemy Behaviour", "TODO" }
     for index, title in ipairs(titles) do
@@ -54,11 +77,8 @@ local function seed(document)
 end
 
 function Board:load()
-    self.document = Document.new()
     self.selection = Selection.new()
-    self.drag = nil
-    self.resize = nil
-    self.marquee = nil
+    self:setDocument(Document.new())
 
     seed(self.document)
 
@@ -70,6 +90,24 @@ function Board:getDocument()
     return self.document
 end
 
+-- Swaps in a whole new document -- opening a file, or File > New.
+--
+-- Selection and any gesture in progress refer to elements in the outgoing document,
+-- so both are dropped: a drag holding ids that no longer exist would keep running
+-- against a document that's already gone.
+function Board:setDocument(document)
+    -- An open inline editor holds an element id from the outgoing document, and its
+    -- commit would land on an element that's no longer on the board.
+    TextEditSession:cancel()
+
+    self.document = document
+    self.selection:clear()
+    self.drag = nil
+    self.resize = nil
+    self.marquee = nil
+    self.marqueeBase = nil
+end
+
 function Board:getSelection()
     return self.selection
 end
@@ -78,6 +116,13 @@ end
 
 function Board:draw()
     drawContext.zoom = Canvas.zoom
+
+    -- Which label, if any, an element type should leave to the inline editor rather
+    -- than drawing itself. Read from the session rather than tracked here, so a
+    -- commit triggered by a click anywhere can't leave this stale.
+    local editing = TextEditSession:getOwner()
+    drawContext.editingId = editing and editing.id or nil
+    drawContext.editingProp = editing and editing.prop or nil
 
     love.graphics.push()
     love.graphics.translate(Canvas.offset.x, Canvas.offset.y)
@@ -89,6 +134,9 @@ function Board:draw()
     end
 
     self:drawSelectionOutlines()
+    -- Inside the transform: the field is anchored to an element, so it pans and zooms
+    -- with it.
+    TextEditSession:drawIn("world")
     self:drawMarquee()
 
     love.graphics.pop()
@@ -202,6 +250,66 @@ function Board:beginMarquee(worldX, worldY, additive)
     end
 end
 
+-- ── Inline text editing ──────────────────────────────────────────────────
+
+-- Opens the shared editor over one of an element's text fields (see
+-- ElementRegistry:textFields). Enter or a click elsewhere keeps the edit, Escape
+-- throws it away; the session handles all of that and calls back here.
+--
+-- Only ids cross into the callbacks. The session outlives the click that opened it,
+-- and both the element table and the field rect can be gone or stale by the time it
+-- ends, so each callback looks the element up again.
+function Board:beginTextEdit(element, field)
+    local id = element.id
+    local prop = field.prop
+
+    TextEditSession:begin({
+        text = element.props[prop],
+        space = WORLD_SPACE,
+        font = field.font,
+        color = field.color,
+        owner = { id = id, prop = prop },
+
+        -- Re-read every frame: the panel behind the field can still be scrolled and
+        -- zoomed under it.
+        getRect = function()
+            local live = self.document:getById(id)
+            local current = live and ElementRegistry:textField(live, prop)
+            if not current then
+                return nil
+            end
+            return current.x, current.y, current.width, current.height
+        end,
+
+        onCommit = function(text)
+            local live = self.document:getById(id)
+            -- A rename that changed nothing shouldn't land on the undo stack, or mark
+            -- the board dirty.
+            if live and live.props[prop] ~= text then
+                self.document:execute(SetProps.capture(live, { [prop] = text }))
+            end
+        end,
+    })
+end
+
+-- F2 on a single selected element, the keyboard route to the same thing a
+-- double-click does. Ambiguous for a multi-selection, so it does nothing there.
+function Board:beginTextEditOnSelection()
+    local ids = self.selection:list()
+    if #ids ~= 1 then
+        return false
+    end
+
+    local element = self.document:getById(ids[1])
+    local field = element and ElementRegistry:textFields(element)[1]
+    if not field then
+        return false
+    end
+
+    self:beginTextEdit(element, field)
+    return true
+end
+
 -- ── Pointer input ────────────────────────────────────────────────────────
 
 function Board:mousepressed(x, y, button, istouch, presses)
@@ -226,6 +334,18 @@ function Board:mousepressed(x, y, button, istouch, presses)
         self.selection:set(element.id)
         self:beginResize(element, handle, worldX, worldY)
         return true
+    end
+
+    -- Double-click on a label edits it. Checked after the resize handles so a quick
+    -- double-click on an edge still resizes, and before the move/select logic so the
+    -- second click doesn't start a drag.
+    if presses and presses >= 2 then
+        local field = ElementRegistry:textFieldAt(element, worldX, worldY)
+        if field then
+            self.selection:set(element.id)
+            self:beginTextEdit(element, field)
+            return true
+        end
     end
 
     if shiftHeld then
@@ -258,12 +378,29 @@ function Board:mousemoved(x, y, dx, dy, istouch)
         return true
     end
 
+    -- A modal dialog owns the pointer everywhere while it's open, not just over its
+    -- own rect, so this is a state check rather than a position query like
+    -- isPointOverUI below -- same reason TextEditSession gets its own check rather
+    -- than going through isPointOverUI too.
+    if DialogManager:isOpen() then
+        Cursor:reset()
+        return false
+    end
+
     -- Idle hover: only show resize/move affordances when the pointer isn't sitting
     -- over the chrome. mousemoved reaches every handler regardless of who consumed
     -- it (see InputManager's broadcast note), so consumption alone can't tell us
     -- that -- this is a direct position query against the UI instead.
     if UI:isPointOverUI(x, y) then
         Cursor:reset()
+        return false
+    end
+
+    -- An open field owns the pointer over itself: an I-beam there, and no resize or
+    -- move affordances from the element underneath, which can't be grabbed anyway
+    -- while the session is swallowing input.
+    if TextEditSession:isActive() then
+        Cursor:setForHandle(TextEditSession:containsPoint(x, y) and "text" or nil)
         return false
     end
 
@@ -418,6 +555,11 @@ end
 -- ── Keyboard shortcuts ───────────────────────────────────────────────────
 
 function Board:keypressed(key, scancode, isrepeat)
+    -- Rename the selected element. Not a Ctrl shortcut, so it's checked first.
+    if key == "f2" then
+        return self:beginTextEditOnSelection()
+    end
+
     -- lgui/rgui so Cmd works if this ever runs on macOS.
     if not isCtrlDown() then
         return false

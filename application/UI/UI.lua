@@ -6,9 +6,11 @@ local MenuBar = require "application.UI.Elements.MenuBar"
 local VerticalMenu = require "application.UI.Elements.VerticalMenu"
 local ToastManager = require "application.UI.ToastManager"
 local Canvas = require "application.Canvas.Canvas"
--- Lazily required in updateStatusBar: Board requires UI, so requiring it here at
--- load time would be a circular require.
+-- Both lazily required: Board requires UI, so requiring either here at load time
+-- would be a circular require. Board is resolved in updateStatusBar, BoardFile in
+-- UI:load() -- by then every module in the cycle is loaded.
 local Board
+local BoardFile
 
 -- The application chrome: menu bar, status bar, and the menus they open.
 --
@@ -17,7 +19,7 @@ local Board
 -- swap, say) without restarting.
 local UI = {}
 
-local APP_NAME = "Loveboard"
+local APP_NAME = "Grimoire"
 
 local panels
 local topMenuBar
@@ -119,11 +121,13 @@ local function buildTopMenuBar()
 
     menus = {}
 
+    -- Same entry points the Ctrl+N/O/S shortcuts call, so menu and keyboard can't
+    -- drift apart.
     local fileMenu = buildDropdown(fileButton, {
-        { "New", function() print("New pressed!") end },
-        { "Open", function() print("Open pressed!") end },
-        { "Save", function() print("Save pressed!") end },
-        { "Save As", function() print("Save As pressed!") end },
+        { "New", function() BoardFile:new() end },
+        { "Open", function() BoardFile:open() end },
+        { "Save", function() BoardFile:save() end },
+        { "Save As", function() BoardFile:saveAs() end },
         { "Exit", function() love.event.quit() end },
     })
     table.insert(menus, fileMenu)
@@ -154,9 +158,12 @@ end
 
 local mousePositionLabel
 local selectionCountLabel
+local fileNameLabel
 
 local function buildStatusBar()
     local refreshIcon = love.graphics.newImage("res/img/icon/refresh_icon.png")
+
+    fileNameLabel = barLabel("Untitled", "foreground")
 
     mousePositionLabel = barLabel("X: 0, Y: 0", "muted")
     -- Widest plausible reading, so the bar doesn't shift width as digit count changes.
@@ -171,6 +178,7 @@ local function buildStatusBar()
         :withPadding(12, 4)
         :withItemSpacing(16)
         :withMinWidth(love.graphics.getWidth())
+        :addLeftItem(fileNameLabel)
         :addLeftItem(mousePositionLabel)
         :addLeftItem(selectionCountLabel)
         :addRightItem(barIconButton(refreshIcon):withOnPress(function() print("Refresh pressed!") end))
@@ -180,6 +188,9 @@ end
 
 local function updateStatusBar()
     Board = Board or require "application.Canvas.Board"
+
+    -- Name of the open board, with a trailing asterisk while it has unsaved edits.
+    fileNameLabel:withText(BoardFile:getStatusText())
 
     local mouseX, mouseY = love.mouse.getPosition()
     local worldX = Canvas:screenToWorldX(mouseX)
@@ -191,6 +202,9 @@ local function updateStatusBar()
 end
 
 function UI:load()
+    -- Before buildTopMenuBar: the File menu's items call straight into it.
+    BoardFile = require "application.BoardFile"
+
     buildPanels()
     buildTopMenuBar()
     buildStatusBar()

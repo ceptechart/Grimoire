@@ -15,6 +15,10 @@ InputManager.PRIORITY = {
 local EVENTS = {
     "keypressed",
     "keyreleased",
+    -- textinput is a typed character, already mapped through the OS keyboard layout;
+    -- textedited is an in-progress IME composition, which isn't text yet.
+    "textinput",
+    "textedited",
     "mousemoved",
     "mousepressed",
     "mousereleased",

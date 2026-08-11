@@ -17,6 +17,7 @@ local HANDLE_CURSORS = {
     ["resize-sw"] = "sizenesw",
     ["resize-nw"] = "sizenwse",
     ["resize-se"] = "sizenwse",
+    ["text"]      = "ibeam",
 }
 
 local function set(systemCursorName)

@@ -74,6 +74,19 @@ function History:redo(document)
     return true
 end
 
+-- An opaque marker for the document's current state, for dirty tracking: take one
+-- when the file is written, compare it against the current one to ask "has anything
+-- changed since?".
+--
+-- The command on top of the undo stack identifies the whole sequence of edits that
+-- produced the current state, which makes undoing back to the point of the last save
+-- report clean again. A monotonic counter can't do that, and neither can a manual
+-- dirty flag. `false` rather than nil for the empty stack, so a caller can hold the
+-- marker in a table field without the field vanishing.
+function History:getStateToken()
+    return self.undoStack[#self.undoStack] or false
+end
+
 function History:canUndo()
     return #self.undoStack > 0
 end
