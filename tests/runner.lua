@@ -146,6 +146,13 @@ end
 function Runner.finish()
     print(("\n==== %d passed, %d failed ===="):format(passes, failures))
     print("screenshots: " .. love.filesystem.getSaveDirectory())
+
+    -- A run's board is scratch, and any step that leaves an edit on it would
+    -- otherwise be met by the unsaved-changes prompt: that blocks the quit and waits
+    -- for a button press nobody is there to make, so the run hangs on the last frame
+    -- instead of exiting with its result. Declaring it clean is the honest version of
+    -- "yes, discard it" -- there's nothing here anyone wanted kept.
+    require("application.BoardFile"):markClean()
     -- Non-zero on failure, so this can gate a CI job without parsing the output.
     love.event.quit(failures > 0 and 1 or 0)
 end

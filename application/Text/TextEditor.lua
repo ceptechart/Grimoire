@@ -21,11 +21,15 @@ local utf8 = require "utf8"
 local TextEditor = Class.extend()
 
 -- Nothing that isn't printable gets in: textinput won't produce control characters,
--- but a pasted clipboard readily contains newlines and tabs.
+-- but a pasted clipboard readily contains newlines and tabs. A multiline editor is the
+-- one case that wants to keep "\n" (0x0A), so it's carved out of the strip class
+-- rather than handled as a special case in every caller.
 local CONTROL_CHARACTERS = "[%z\1-\31\127]"
+local CONTROL_CHARACTERS_KEEP_NEWLINE = "[%z\1-\9\11-\31\127]"
 
-local function sanitize(text)
-    return (tostring(text or ""):gsub(CONTROL_CHARACTERS, ""))
+local function sanitize(text, multiline)
+    local pattern = multiline and CONTROL_CHARACTERS_KEEP_NEWLINE or CONTROL_CHARACTERS
+    return (tostring(text or ""):gsub(pattern, ""))
 end
 
 -- Invalid byte sequences simply don't match charpattern and are dropped, which is the
@@ -42,7 +46,7 @@ local function isWordCharacter(character)
     return character ~= nil and character:match("[%w_]") ~= nil
 end
 
--- options: { maxLength = n }
+-- options: { maxLength = n, multiline = bool }
 function TextEditor.new(text, options)
     options = options or {}
 
@@ -54,6 +58,7 @@ function TextEditor.new(text, options)
         caret = 0,
         anchor = 0,
         maxLength = options.maxLength,
+        multiline = options.multiline or false,
     }, TextEditor)
 
     editor:setText(text)
@@ -190,7 +195,7 @@ function TextEditor:invalidate()
 end
 
 function TextEditor:setText(text)
-    self.characters = split(sanitize(text))
+    self.characters = split(sanitize(text, self.multiline))
     self.caret = #self.characters
     self.anchor = self.caret
     self:invalidate()
@@ -218,7 +223,7 @@ end
 function TextEditor:insert(text)
     self:deleteSelection()
 
-    local incoming = split(sanitize(text))
+    local incoming = split(sanitize(text, self.multiline))
     if self.maxLength then
         local room = self.maxLength - #self.characters
         while #incoming > math.max(0, room) do

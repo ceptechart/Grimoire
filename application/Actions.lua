@@ -56,6 +56,24 @@ function Actions.deselectAll()
     return board():deselectAll()
 end
 
+function Actions.invertSelection()
+    return board():invertSelection()
+end
+
+-- ── Clipboard ────────────────────────────────────────────────────────────
+
+function Actions.cut()
+    return board():cutSelection()
+end
+
+function Actions.copy()
+    return board():copySelection()
+end
+
+function Actions.paste()
+    return board():pasteClipboard()
+end
+
 -- ── View ─────────────────────────────────────────────────────────────────
 
 function Actions.zoomIn()
@@ -70,6 +88,11 @@ end
 
 function Actions.resetZoom()
     Canvas:resetZoom()
+    return true
+end
+
+function Actions.resetView()
+    Canvas:resetView()
     return true
 end
 

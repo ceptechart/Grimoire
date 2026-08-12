@@ -24,6 +24,10 @@ Tools.SELECT = "select"
 --   icon        path to the button image
 --   shortcut    optional single key that selects this tool
 --   createType  optional element type this tool drags out (see CreateGesture)
+--   connectType optional element type this tool connects two elements with (see
+--               LineGesture) -- mutually exclusive with createType: unlike a plain
+--               create, the press has to land on an element already, since a
+--               connector means nothing without two elements to join.
 local definitions = {
     {
         name = Tools.SELECT,
@@ -39,6 +43,34 @@ local definitions = {
         icon = "res/img/tool/panel.png",
         shortcut = "p",
         createType = "panel",
+    },
+    {
+        name = "container",
+        label = "Container",
+        icon = "res/img/tool/container.png",
+        shortcut = "c",
+        createType = "container",
+    },
+    {
+        name = "text",
+        label = "Text",
+        icon = "res/img/tool/text.png",
+        shortcut = "t",
+        createType = "text",
+    },
+    {
+        name = "image",
+        label = "Image",
+        icon = "res/img/tool/image.png",
+        shortcut = "i",
+        createType = "image",
+    },
+    {
+        name = "line",
+        label = "Line",
+        icon = "res/img/tool/line.png",
+        shortcut = "l",
+        connectType = "line",
     },
 }
 

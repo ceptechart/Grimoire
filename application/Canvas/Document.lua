@@ -223,6 +223,10 @@ function Document.fromData(data)
             table.insert(warnings, ("Unknown element type '%s' -- kept as-is"):format(element.type))
         end
 
+        -- Element.fromData validated the fields every element has; this is where a
+        -- type gets to say the same about whatever it keeps in props.
+        ElementRegistry:normalize(element)
+
         document:insert(element)
     end
 

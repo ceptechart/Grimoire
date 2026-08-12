@@ -18,12 +18,26 @@ local DEFAULT_HEIGHT = 160
 local MIN_WIDTH = 160
 local MIN_HEIGHT = HEADER_HEIGHT + 48
 
--- Shared by every panel element, like the UI's chrome panels: it carries style, not
+-- The colors one panel-shaped element type draws itself in. A style is built once per
+-- type rather than per element, like the UI's chrome panels: it carries style, not
 -- position, and is drawn into whatever rect it's handed.
-local bodyPanel = Panel.new()
-    :withColor("elementSurface")
-    :withLineColor("elementBorder")
-    :withShadow(true)
+--
+-- This is the seam a derived type uses (see ContainerElement): everything below the
+-- colors -- the header strip, the title clipping, the resize zones -- is identical
+-- across rectangular types, so a type that only wants to look different reuses
+-- drawFrame with a style of its own rather than copying it.
+function PanelElement.newStyle(surface, header, border)
+    return {
+        panel = Panel.new()
+            :withColor(surface)
+            :withLineColor(border)
+            :withShadow(true),
+        header = header,
+        border = border,
+    }
+end
+
+local DEFAULT_STYLE = PanelElement.newStyle("elementSurface", "elementHeader", "elementBorder")
 
 function PanelElement.defaultSize()
     return DEFAULT_WIDTH, DEFAULT_HEIGHT
@@ -87,20 +101,23 @@ function PanelElement.hitTestHandle(element, x, y, zoom)
     return nil
 end
 
-function PanelElement.draw(element, context)
-    bodyPanel:draw(element.x, element.y, element.width, element.height)
+-- The panel body, header strip and title, in a style's colors. Split out from draw so
+-- a derived type can render the same shape in colors of its own.
+function PanelElement.drawFrame(element, context, style)
+    style = style or DEFAULT_STYLE
+    style.panel:draw(element.x, element.y, element.width, element.height)
 
     local r, g, b, a = love.graphics.getColor()
     local radius = Theme:metric("cornerRadius")
 
     -- Rounded where it meets the panel's top corners, square where it meets the
     -- body: draw the rounded rect, then patch over its bottom corners.
-    love.graphics.setColor(Theme:color("elementHeader"):unpacked())
+    love.graphics.setColor(Theme:color(style.header):unpacked())
     love.graphics.rectangle("fill", element.x, element.y, element.width, HEADER_HEIGHT, radius, radius)
     love.graphics.rectangle("fill", element.x, element.y + HEADER_HEIGHT - radius, element.width, radius)
 
     local previousLineWidth = love.graphics.getLineWidth()
-    love.graphics.setColor(Theme:color("elementBorder"):unpacked())
+    love.graphics.setColor(Theme:color(style.border):unpacked())
     love.graphics.setLineWidth(1 / context.zoom)
     love.graphics.line(
         element.x, element.y + HEADER_HEIGHT,
@@ -131,6 +148,10 @@ function PanelElement.draw(element, context)
     end
 
     love.graphics.setColor(r, g, b, a)
+end
+
+function PanelElement.draw(element, context)
+    PanelElement.drawFrame(element, context, DEFAULT_STYLE)
 end
 
 return PanelElement

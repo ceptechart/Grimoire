@@ -2,6 +2,7 @@ local Class = require "lib.util.Class"
 local Gesture = require "application.Canvas.gestures.Gesture"
 local RectResize = require "application.Canvas.RectResize"
 local ElementRegistry = require "application.Canvas.ElementRegistry"
+local Containment = require "application.Canvas.Containment"
 local Composite = require "application.Canvas.commands.Composite"
 local ResizeElement = require "application.Canvas.commands.ResizeElement"
 local ReorderElement = require "application.Canvas.commands.ReorderElement"
@@ -23,11 +24,19 @@ function ResizeGesture.new(board, element, handle, worldX, worldY)
     gesture.id = element.id
     gesture.handle = handle
     gesture.origin = { x = element.x, y = element.y, width = element.width, height = element.height }
-    gesture.minWidth, gesture.minHeight = ElementRegistry:minSize(element.type)
 
-    -- A resize never adds or removes elements, so the index the raise lands on stays
-    -- put until release and can be read back then as the document's length.
-    gesture.raisedFrom = gesture.document:raiseToFront(element.id)
+    -- minSizeOf rather than minSize: a container's minimum is its contents', not its
+    -- type's static default, so grabbing its own edge can't shrink it past what's
+    -- laid out inside it. The same call answers the type default for anything else.
+    gesture.minWidth, gesture.minHeight = ElementRegistry:minSizeOf(element, gesture.document)
+
+    -- Raised together with whatever it lays out, not on its own -- raising just the
+    -- element would put it past its own children in document order (append-to-front
+    -- is a move to the *end* of the array), which draws it in front of the very
+    -- things it's supposed to sit behind. withDescendants is a no-op list of one for
+    -- anything that isn't a container, so this is exactly the old behaviour there.
+    gesture.raised = gesture.document:raiseAllToFront(
+        Containment.withDescendants(gesture.document, { element.id }))
 
     return gesture
 end
@@ -46,9 +55,8 @@ end
 function ResizeGesture:finish()
     local commands = {}
 
-    if self.raisedFrom then
-        table.insert(commands,
-            ReorderElement.new(self.id, self.raisedFrom, self.document:count()))
+    for _, raise in ipairs(self.raised) do
+        table.insert(commands, ReorderElement.new(raise.id, raise.fromIndex, raise.toIndex))
     end
 
     local element = self.document:getById(self.id)

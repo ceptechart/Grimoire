@@ -29,6 +29,18 @@ return {
         elementBorder  = 0x4A4A52, -- element outline (PanelElement only; UnknownElement uses toastWarn instead)
         elementTitle   = 0xD4D4D4, -- title text drawn in the header
 
+        -- ContainerElement.lua: an element that holds other elements. Darker than a
+        -- plain panel's body so the children it lays out read as raised tiles on a
+        -- tray rather than as one continuous surface.
+        containerSurface = 0x1F1F23, -- container body, seen in the padding around its children
+        containerHeader  = 0x323238, -- title bar strip
+        containerBorder  = 0x4A4A52, -- container outline
+
+        -- MoveGesture.lua: the slot a dragged element would land in, previewed while
+        -- the pointer is over a container.
+        dropTargetFill   = { 0x3B82F6, 0.22 },
+        dropTargetBorder = { 0x3B82F6, 0.9 },
+
         -- Inline text editing: the field a label turns into while it's being typed
         -- in, and the caret and selection drawn over it.
         editFieldSurface = 0x1E1E1E, -- filled box behind the text being edited
@@ -75,6 +87,12 @@ return {
         selectionAlt  = 0x85b1c7,
         marqueeFill   = { 0x3B82F6, 0.12 }, -- MarqueeGesture -- fill of the drag-to-select rect
         marqueeBorder = { 0x3B82F6, 0.6 },  -- MarqueeGesture -- outline of the drag-to-select rect
+
+        -- LineElement.lua: the connector between two panels. It carries its own
+        -- selection color rather than the generic pulsing outline every other element
+        -- gets, since the stroke itself is the whole element.
+        line         = 0xE0C25E, -- soft yellow, unselected
+        lineSelected = 0x3B82F6, -- same blue as the rest of the app's selection/accent uses
 
         -- Toast.lua: border + icon + label tint for each toast type
         -- (Toast.SUCCESS/INFO/WARN/ERROR). toastWarn doubles as UnknownElement's

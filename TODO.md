@@ -47,9 +47,6 @@ See CLAUDE.md's "Persistence" section for the reasoning and the file shape.
       `.bak` first and is renamed back if the swap fails — the failure mode this was
       warned against. Covered in `tests/smoke.lua`, including the overwrite-in-place case
       and asserting neither temporary is left behind.
-- [ ] The open/save-as dialogs are only smoke-tested as far as "the dialog opens without
-      an argument error"; the callback paths were exercised with the dialog stubbed. Walk
-      them once by hand with real clicks.
 - [ ] Recent files list, persisted to the save directory.
 - [ ] Autosave / crash recovery (defer until the format is stable).
 
@@ -74,10 +71,15 @@ Create and delete both work. What's left is the copy/duplicate/z-order family.
       its index* so revert restores exact z-order (`Document:remove` already returns both).
       Wire to Delete/Backspace in `Board:keypressed` and to `Edit > Delete`.
 - [ ] Duplicate (Ctrl+D) — offset copy, new ids, selection follows the copies.
-- [ ] Copy/cut/paste (Ctrl+C/X/V) with an in-app clipboard; paste at pointer. Cross-process
-      paste via `love.system.setClipboardText` using the §1 serializer is a nice follow-on.
-      Removed from the Edit menu until they exist — an item that silently does nothing is
-      worse than one that isn't offered. Add them back alongside the implementation.
+- [x] Copy/cut/paste (Ctrl+C/X/V) with an in-app clipboard (`Board.clipboard`, plain
+      type/geometry/props data with no ids, so paste always mints fresh elements).
+      Paste lands the copied group's top-left under the pointer — the same real-cursor
+      `love.mouse.getPosition()` read `Canvas:wheelmoved` already relies on for
+      zoom-at-cursor — as one undo step via `Composite.of`, and the pasted elements
+      become the selection. Toasts on all three via `UI:showToast`. Back in the Edit
+      menu now that they exist.
+  - [ ] Cross-process paste via `love.system.setClipboardText` using the §1 serializer
+        is a nice follow-on — clipboard is in-app/in-process only for now.
 - [x] `Edit` menu items no longer `print()`: Undo / Redo / Select All / Delete all go
       through `application/Actions.lua`, which is also what `Board:keypressed` calls, so
       menu and keyboard are two doors onto one implementation. New verbs go there.
@@ -172,11 +174,53 @@ palette and gives it `CreateGesture` for free. `PanelElement` is the template;
 - [ ] **Text label** — no background, size follows the text.
 - [ ] **Image** — needs a decision on whether the file is referenced by relative path
       (git-friendly, matches the local-first goal) or embedded.
-- [ ] **Connector / link** — the Twine-ish piece, and the one that stresses the model:
-      it's anchored to two elements rather than being a free rect, so it needs endpoint
-      references, re-routing when an endpoint moves, non-rect hit testing, and a rule for
-      what happens when an endpoint element is deleted. Design it before building it.
-- [ ] **Group / frame** — a rect that owns children and moves them together.
+- [x] **Connector / line** — anchored to two elements rather than being a free rect, in
+      `application/Canvas/elements/LineElement.lua`. Not a `PanelElement` derivative:
+      what's stored is relative (`fromId`/`toId`, plus each end's side-of-rect and
+      fraction along it), and the endpoints themselves are derived every frame by
+      `ElementRegistry:updateGeometry` (dispatched from `Board:update`, after
+      `Containment.layoutAll`) the same way a container's child rect is — so a resize
+      or drag re-routes it for free. Selecting it recolors the stroke itself
+      (`ownSelectionColor` opts a type out of the generic bounding-box outline, which
+      would otherwise span the whole diagonal) rather than drawing an outline, since
+      the stroke *is* the whole visible element. Hit testing is point-to-segment
+      distance rather than the rect-based default. Made with a new `connectType` tool
+      field (`LineGesture`, alongside `createType`'s `CreateGesture`) — the press has
+      to land on a real element rather than owning the whole canvas the way a create
+      does, since a connector means nothing without two elements to join. Deleting
+      either endpoint cascades to the line via a new `ElementRegistry:dependsOn` hook,
+      the mirror image of a container's `childIds` gathering its own delete.
+  - [ ] No way to re-aim an existing line's endpoints after creation, or to add a label
+        to it (`textFields` isn't implemented).
+  - [ ] Copying one of the two panels a line connects doesn't bring the line along,
+        unlike a container and its children.
+- [x] **Container** — a panel that arranges other elements in a recursive split tree
+      (`row`/`column` splits down to leaves, not a fixed grid — a leaf can be nested
+      inside a wrapping split of either direction at any depth), derived from
+      `PanelElement` by delegation (`drawFrame`/`hitTestHandle`/`textFields`). Children
+      stay ordinary elements in the document, referenced by id from the container's
+      `props.layout`, so selection, delete, undo, inline editing and the save format
+      all work on them unchanged; their geometry is derived by a per-frame pass
+      (`Containment.layoutAll` from `Board:update`). Dragging in and out is part of
+      `MoveGesture` — past a small threshold it detaches what it picked up and previews
+      either a slot beside a specific element or, near the container's own outer edge,
+      a span across the whole tree (this is what makes an element able to span a whole
+      *column*, not just a whole row) — and a child's resize handle runs
+      `CellResizeGesture`, which walks up the tree from the grabbed leaf for the
+      nearest boundary with something to trade space with, falling through to
+      resizing the container itself at the true outer edge. See CLAUDE.md's
+      "Containers" section for the model and the rules that fall out of it.
+  - [ ] Creating straight into a container: `CreateGesture` drops the new element on
+        top of one rather than into it, so it has to be dragged in afterwards. The drop
+        machinery is all in `Containment`; this is wiring `CreateGesture:finish` to it.
+  - [ ] Reordering a child by dragging *within* its own container works, but only by
+        going through detach-and-drop, so its old slot collapses under the pointer
+        mid-drag. Holding the space open would read better.
+  - [ ] Nothing distributes evenly / resets weights. A "distribute" verb in `Actions`
+        would be a `SetProps` over `layout` and nothing else.
+- [ ] **Group / frame** — a rect that owns children and moves them together, without a
+      container's grid. Now mostly a matter of implementing the containment hooks:
+      `Containment` dispatches them generically, so `Board` needs no changes.
 - [ ] Per-element color/style overrides via `props` (`Theme:resolveColor` already accepts a
       literal value, so this needs no new theme entries).
 
@@ -207,6 +251,10 @@ palette and gives it `CreateGesture` for free. `PanelElement` is the template;
       out one step at a time — the active tool first, then the selection — and is still
       only consumed when it did something. Invert is still open.
 - [ ] Arrow-key nudge, Shift+arrow for a coarse step — reuses `MoveElements` as-is.
+- [ ] Dragging a multi-selection that includes an element inside a container detaches it
+      but never drops it — `MoveGesture` only offers a drop for a one-element drag, since
+      a drop descriptor names a single slot. Deciding what a group should mean (fill one
+      row? one cell each?) is the open part, not the plumbing.
 - [ ] Group resize: `Board:mousepressed` deliberately narrows a `ResizeGesture` to a single
       element. Multi-resize needs a selection bounding box with its own handles and
       proportional per-element scaling — which is a new gesture in
@@ -245,6 +293,10 @@ palette and gives it `CreateGesture` for free. `PanelElement` is the template;
 ## 9. Performance (not urgent — revisit when boards get big)
 
 - [ ] Cull elements outside the viewport in `Board:draw`.
+- [ ] `Containment.layoutAll` runs unconditionally every frame and recomputes each
+      container's grid from scratch, and `parentOf` is a linear scan called per press
+      and per dragged element. Both are bounded by the board and fine at this size;
+      a dirty flag on the container would be the fix if a profile ever says so.
 - [ ] `Document:indexOf` and `Document:remove` are O(n) linear scans, and `raiseAllToFront`
       calls them in a loop — O(n²) on a large multi-select drag. Fine at three elements;
       measure before optimizing.
@@ -264,10 +316,18 @@ See CLAUDE.md's "Testing changes".
 - [x] A dedicated test entry point — `love . test <name>` loading `tests/<name>.lua`.
       Steps run one per frame, so a test can hold a gesture open across frames and see
       what a user would. Exits non-zero on failure.
-- [x] `tests/smoke.lua` — 57 assertions covering every gesture and its undo (position
+- [x] `tests/smoke.lua` — 206 assertions covering every gesture and its undo (position
       *and* z-order), delete/undo, the `Actions` verbs, `Selection`'s tracked count, and
-      a save → load → re-encode round trip through the atomic writer. Plus three
-      screenshot passes for the things only a human can check.
+      a save → load → re-encode round trip through the atomic writer. The container
+      block covers drop/detach/nest and their undo, splitting a row and splitting a
+      *column* (spanning the whole tree, not just one slot in it — the feature the
+      recursive-tree rework was for), cell resize both within a row and between rows
+      (the boundary search walking up the tree to find one), the outermost-edge
+      fall-through, resizing a container by its own edge without it jumping in front
+      of its children, deleting a container cascading to its contents and undoing back
+      to the exact arrangement, a container through copy/paste (id remapping), and a
+      hand-broken `layout` opening rather than crashing. Plus six screenshot passes
+      for the things only a human can check.
 - [ ] Headless unit tests for the pure modules (`History`, `Document`, `Selection`, the
       commands, the serializer). They don't need a window — but they do need a Lua
       interpreter on PATH, which the current setup doesn't have, so for now they run
@@ -348,8 +408,12 @@ Worth settling before the code that depends on them gets written.
    keys and rounded numbers. Per-element files would merge better in git, but they're
    worse to hand-edit and slower to load; revisit only if merge pain shows up in
    practice. Rationale is in CLAUDE.md.
-2. **Connectors**: are they elements in the same list (needing endpoint references and a
-   deletion rule), or a separate relation table in the document?
+2. ~~**Connectors**~~ — settled: an element in the same list (`LineElement`), not a
+   separate relation table — storing `fromId`/`toId` in props keeps selection, undo,
+   copy/paste id-remapping and the save format working on it unchanged, the same
+   argument that settled containers holding their children as ordinary elements
+   rather than nested data. Deletion rule is `ElementRegistry:dependsOn`: removing
+   either endpoint cascades to the line. See §5.
 3. **Scope of "board"**: one file per board, or one file holding multiple named boards/tabs?
    This decides whether `Board` stays a singleton.
 4. **Coordinate units**: the status bar's unexplained `/100` divisor is gone, so nothing

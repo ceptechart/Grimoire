@@ -24,7 +24,7 @@ local BoardFile
 local UI = {}
 
 local APP_NAME = "Grimoire"
-local APP_VERSION = "0.1.0"
+local APP_VERSION = "a0.1.0"
 
 -- Help > About. A confirm dialog with a single button is the only dialog shape there
 -- is so far -- worth a plain alert variant if a second one of these turns up.
@@ -32,8 +32,8 @@ local function showAboutDialog()
     DialogManager:confirm({
         title = ("%s %s"):format(APP_NAME, APP_VERSION),
         message = "A local-first bulletin board for game projects.\n\n"
-            .. "Boards are saved as plain JSON with a .grimoire extension, "
-            .. "meant to live in the repository alongside the rest of the project.",
+            .. "TODO: "
+            .. "Include external libraries and lisences.",
         buttons = {
             { label = "Close", style = "primary", default = true, cancel = true },
         },
@@ -149,6 +149,7 @@ end
 local function buildTopMenuBar()
     local fileButton = barButton("File")
     local editButton = barButton("Edit")
+    local selectionButton = barButton("Selection")
     local viewButton = barButton("View")
     local helpButton = barButton("Help")
 
@@ -160,6 +161,7 @@ local function buildTopMenuBar()
         :withMinWidth(love.graphics.getWidth())
         :addLeftItem(fileButton)
         :addLeftItem(editButton)
+        :addLeftItem(selectionButton)
         :addLeftItem(viewButton)
         :addLeftItem(helpButton)
         :addCenterItem(barLabel(APP_NAME, "accent"))
@@ -182,19 +184,27 @@ local function buildTopMenuBar()
 
     -- Every item below goes through Actions, which is also what Board's keyboard
     -- shortcuts call -- menu and keyboard are two doors onto one implementation.
-    -- Cut/Copy/Paste aren't here because they don't exist yet (TODO 2); an item that
-    -- silently does nothing is worse than one that isn't offered.
     local editMenu = buildDropdown(editButton, {
         { "Undo", Actions.undo },
         { "Redo", Actions.redo },
-        { "Select All", Actions.selectAll },
+        { "Cut", Actions.cut },
+        { "Copy", Actions.copy },
+        { "Paste", Actions.paste },
         { "Delete", Actions.delete },
     })
     table.insert(menus, editMenu)
 
+    local selectionMenu = buildDropdown(selectionButton, {
+        { "Select All", Actions.selectAll },
+        { "Deselect All", Actions.deselectAll },
+        { "Invert Selection", Actions.invertSelection },
+    })
+    table.insert(menus, selectionMenu)
+
     local viewMenu = buildDropdown(viewButton, {
         { "Zoom In", Actions.zoomIn },
         { "Zoom Out", Actions.zoomOut },
+        { "Reset View", Actions.resetView },
         { "Reset Zoom", Actions.resetZoom },
     })
     table.insert(menus, viewMenu)

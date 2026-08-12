@@ -14,6 +14,20 @@ local Element = require "application.Canvas.Element"
 --   textFields(element)                  optional, -> the editable text on this
 --                                        element (see textFields below)
 --
+-- A type that holds other elements implements a further optional group, dispatched
+-- generically by application/Canvas/Containment.lua so nothing outside that module
+-- (Board included) has to know a concrete container type exists:
+--
+--   childIds(element)                    -> the ids this element lays out
+--   minSizeFor(element, document)        -> minimum size *for this instance*, which
+--                                           for a container depends on its contents
+--   layoutChildren(element, document)    writes each child's rect
+--   dropTarget(element, x, y, document)  -> where a drop at this point would land,
+--                                           plus the rect to preview it with
+--   withChild(element, drop, childId)    -> a props update adding that child
+--   withoutChild(element, childId)       -> a props update removing it, or nil
+--   remapIds(element, idMap)             rewrites stored ids after a paste
+--
 -- Adding shapes, notes, images or containers later is a new file plus one
 -- register() call -- nothing here or in Document needs to know about them.
 --
@@ -146,12 +160,134 @@ function ElementRegistry:textField(element, prop)
     return nil
 end
 
+-- Double-clicking a spot on an element that isn't one of its text fields -- an
+-- image's body, say, rather than its title. `setProp(values)` lets the type record
+-- an undoable change without knowing anything about Document or commands; Board
+-- supplies it bound to this element's live id, the same indirection beginTextEdit's
+-- onCommit uses so a callback that fires later (an async file dialog, here) can't
+-- write into a document the element has since left.
+--
+-- Optional, so this is the one dispatch in the "containment" group's shape (see the
+-- header) that lives down here instead: every other element type answers false/nil
+-- for it implicitly, by not being asked in the first place -- Board only calls this
+-- after a text field lookup has already come up empty.
+function ElementRegistry:handleDoubleClick(element, x, y, setProp)
+    local definition = self:resolve(element.type)
+    if definition.handleDoubleClick then
+        return definition.handleDoubleClick(element, x, y, setProp)
+    end
+    return false
+end
+
 function ElementRegistry:minSize(elementType)
     local definition = self:resolve(elementType)
     if definition.minSize then
         return definition.minSize()
     end
     return DEFAULT_MIN_SIZE, DEFAULT_MIN_SIZE
+end
+
+-- The minimum size of one particular element, rather than of its type.
+--
+-- Same answer as minSize for everything that doesn't hold other elements. A container
+-- is the exception: its minimum is whatever its contents need, so it changes as they
+-- come and go, and a caller with an element in hand should ask this instead.
+function ElementRegistry:minSizeOf(element, document)
+    local definition = self:resolve(element.type)
+    if definition.minSizeFor then
+        return definition.minSizeFor(element, document)
+    end
+    return self:minSize(element.type)
+end
+
+-- ── Containment ──────────────────────────────────────────────────────────
+--
+-- Thin dispatch for the optional hooks a type that holds other elements implements
+-- (see the header). Everything here answers nil/false for a type that doesn't, so
+-- Containment can ask any element without checking what it is first.
+
+function ElementRegistry:childIds(element)
+    local definition = self:resolve(element.type)
+    return definition.childIds and definition.childIds(element) or nil
+end
+
+function ElementRegistry:isContainer(element)
+    return self:resolve(element.type).dropTarget ~= nil
+end
+
+function ElementRegistry:layoutChildren(element, document)
+    local definition = self:resolve(element.type)
+    if definition.layoutChildren then
+        definition.layoutChildren(element, document)
+    end
+end
+
+-- The live geometry of an element's contents -- the split tree a container currently
+-- resolves to, in world coordinates. What a cell resize drags the edges of.
+function ElementRegistry:contentLayout(element, document)
+    local definition = self:resolve(element.type)
+    return definition.contentLayout and definition.contentLayout(element, document) or nil
+end
+
+function ElementRegistry:dropTarget(element, x, y, document)
+    local definition = self:resolve(element.type)
+    return definition.dropTarget and definition.dropTarget(element, x, y, document) or nil
+end
+
+function ElementRegistry:withChild(element, drop, childId)
+    return self:resolve(element.type).withChild(element, drop, childId)
+end
+
+function ElementRegistry:withoutChild(element, childId)
+    local definition = self:resolve(element.type)
+    return definition.withoutChild and definition.withoutChild(element, childId) or nil
+end
+
+-- Puts an element's props into the shape its type expects, for an element that has
+-- just come off disk. A board file is JSON anything could have written -- and
+-- hand-editing one is deliberately supported -- so a type storing structure in props
+-- (a container's split tree) repairs what it can here and drops what it can't,
+-- rather than every reader of that structure defending against it.
+--
+-- Only registered types get this: an element the fallback stands in for keeps its
+-- props byte-for-byte, which is the whole point of the fallback.
+function ElementRegistry:normalize(element)
+    local definition = definitions[element.type]
+    if definition and definition.normalizeProps then
+        definition.normalizeProps(element)
+    end
+end
+
+-- Rewrites ids stored inside props after a paste, which mints new ones. Called with
+-- a map of old id -> new id covering everything that came in with the paste; ids
+-- outside it refer to elements that weren't copied and are dropped.
+function ElementRegistry:remapIds(element, idMap)
+    local definition = self:resolve(element.type)
+    if definition.remapIds then
+        definition.remapIds(element, idMap)
+    end
+end
+
+-- ── Derived geometry and cross-element references ───────────────────────────
+--
+-- For a type whose geometry depends on another element rather than owning its own
+-- (a line connecting two panels): a chance to recompute itself every frame, the same
+-- point Containment.layoutAll runs at -- after that frame's input, before its draw.
+-- Optional; everything else no-ops here implicitly, by not defining the hook.
+function ElementRegistry:updateGeometry(element, document)
+    local definition = self:resolve(element.type)
+    if definition.updateGeometry then
+        definition.updateGeometry(element, document)
+    end
+end
+
+-- The ids of other elements this one's identity depends on -- what should be removed
+-- along with it, the same way a container's children are gathered for a delete, but
+-- in the opposite direction: a line depends on the panels it connects, not the other
+-- way around. nil for anything that doesn't reference another element's id.
+function ElementRegistry:dependsOn(element)
+    local definition = self:resolve(element.type)
+    return definition.dependsOn and definition.dependsOn(element) or nil
 end
 
 return ElementRegistry

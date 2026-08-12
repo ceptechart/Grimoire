@@ -87,7 +87,7 @@ function Toast.new(type, text, options)
         :withShadow(true)
 
     toast.label = Label.new(text)
-        :withFont("medium")
+        :withFont("small")
         :withColor(ACCENT_TOKEN[type])
         :withIcon(iconFor(type), 8)
         :withPadding(12, 10)

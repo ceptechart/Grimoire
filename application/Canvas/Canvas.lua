@@ -23,7 +23,7 @@ Canvas.zoom = 1
 Canvas.panning = false
 
 function Canvas:load()
-    self.offset:set(love.graphics.getWidth() / 2, love.graphics.getHeight() / 2)
+    self:resetView()
 
     -- Lowest priority: the canvas only sees pointer input the UI didn't consume.
     InputManager:subscribeAll(InputManager.MOUSE_EVENTS, self, InputManager.PRIORITY.CANVAS)
@@ -162,6 +162,10 @@ end
 -- as well would lose the user's place on the board.
 function Canvas:resetZoom()
     self:zoomByStep(1 / self.zoom)
+end
+function Canvas:resetView()
+    self:resetZoom()
+    self.offset:set(love.graphics.getWidth() / 2, love.graphics.getHeight() / 2)
 end
 
 function Canvas:wheelmoved(x, y)

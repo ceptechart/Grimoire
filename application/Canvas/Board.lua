@@ -9,15 +9,20 @@ local Document = require "application.Canvas.Document"
 local Selection = require "application.Canvas.Selection"
 local Cursor = require "application.Canvas.Cursor"
 local ElementRegistry = require "application.Canvas.ElementRegistry"
+local Containment = require "application.Canvas.Containment"
 local TextEditSession = require "application.Text.TextEditSession"
 local DialogManager = require "application.UI.DialogManager"
+local Element = require "application.Canvas.Element"
 local AddElement = require "application.Canvas.commands.AddElement"
 local RemoveElements = require "application.Canvas.commands.RemoveElements"
 local SetProps = require "application.Canvas.commands.SetProps"
+local Composite = require "application.Canvas.commands.Composite"
 local MoveGesture = require "application.Canvas.gestures.MoveGesture"
 local ResizeGesture = require "application.Canvas.gestures.ResizeGesture"
+local CellResizeGesture = require "application.Canvas.gestures.CellResizeGesture"
 local MarqueeGesture = require "application.Canvas.gestures.MarqueeGesture"
 local CreateGesture = require "application.Canvas.gestures.CreateGesture"
+local LineGesture = require "application.Canvas.gestures.LineGesture"
 
 -- The view and controller over a Document: draws its elements through the canvas
 -- transform, turns pointer input into edits, and owns the board's shortcuts.
@@ -33,6 +38,10 @@ local CreateGesture = require "application.Canvas.gestures.CreateGesture"
 local Board = {}
 
 ElementRegistry:register(require "application.Canvas.elements.PanelElement")
+ElementRegistry:register(require "application.Canvas.elements.ContainerElement")
+ElementRegistry:register(require "application.Canvas.elements.ImageElement")
+ElementRegistry:register(require "application.Canvas.elements.TextElement")
+ElementRegistry:register(require "application.Canvas.elements.LineElement")
 ElementRegistry:setFallback(require "application.Canvas.elements.UnknownElement")
 
 local DRAG_BUTTON = 1
@@ -80,6 +89,10 @@ end
 
 function Board:load()
     self.selection = Selection.new()
+    -- Plain data, not element references (see copySelection) -- explicitly nil rather
+    -- than left implicit, the same reasoning §"Known rough edges" gives for every
+    -- other piece of Board state.
+    self.clipboard = nil
     self.time = 0
     -- Reused rather than rebuilt per frame; refreshed at the top of draw().
     self.drawContext = { zoom = 1 }
@@ -116,14 +129,62 @@ end
 
 -- ── Selection edits ──────────────────────────────────────────────────────
 
--- Deletes every selected element as one undo step. No-ops on an empty selection so
--- Delete/Backspace and Edit > Delete can call it unconditionally.
-function Board:deleteSelection()
-    local ids = self.document:selectedIds(self.selection)
-    if #ids == 0 then
+local function countLabel(count, word)
+    return ("%d %s%s"):format(count, word, count == 1 and "" or "s")
+end
+
+-- Deletes every selected element as one undo step -- and, for anything selected that
+-- lays out other elements, everything inside it too, at any depth. Unlike a plain
+-- delete, taking a container's contents along here is right: a delete removes what
+-- was selected, and content left orphaned by a container that's gone isn't visibly
+-- "still there" the way it is after a copy or a detach -- there's no free-floating
+-- trace of the container left for it to still belong to.
+--
+-- No-ops on an empty selection so Delete/Backspace and Edit > Delete can call it
+-- unconditionally.
+function Board:deleteSelection(showToast)
+    if showToast == nil then showToast = true end
+    local selected = self.document:selectedIds(self.selection)
+    if #selected == 0 then
         return false
     end
 
+    -- RemoveElements needs its ids in document order to revert safely (see
+    -- CLAUDE.md's "Selection ordering" and "A command over several elements must
+    -- revert in reverse order") -- Containment.descendants walks a container's own
+    -- child list, not document order, so the combined set is re-sorted from the
+    -- document itself rather than trusted as given.
+    local toRemove = {}
+    for _, id in ipairs(Containment.withDescendants(self.document, selected)) do
+        toRemove[id] = true
+    end
+
+    -- Anything whose identity depends on something being removed goes too -- a line
+    -- loses its meaning the instant either panel it connects is gone, the same way a
+    -- container's children are gathered above, just in the opposite direction (see
+    -- ElementRegistry:dependsOn). One pass is enough: nothing currently depends on a
+    -- line, so there's no chain to walk.
+    for _, element in ipairs(self.document.elements) do
+        if not toRemove[element.id] then
+            for _, dependencyId in ipairs(ElementRegistry:dependsOn(element) or {}) do
+                if toRemove[dependencyId] then
+                    toRemove[element.id] = true
+                    break
+                end
+            end
+        end
+    end
+
+    local ids = {}
+    for _, element in ipairs(self.document.elements) do
+        if toRemove[element.id] then
+            ids[#ids + 1] = element.id
+        end
+    end
+
+    if showToast then
+        UI:showToast("warn", "Deleted " .. countLabel(#ids, "element"), { timeout = 2 })
+    end
     self.document:execute(RemoveElements.new(ids))
     self.selection:clear()
     return true
@@ -148,6 +209,142 @@ function Board:deselectAll()
     return true
 end
 
+-- Flips membership of every element on the board. No-op on an empty document, since
+-- there's nothing to select either way.
+function Board:invertSelection()
+    local ids = self.document:allIds()
+    if #ids == 0 then
+        return false
+    end
+    for _, id in ipairs(ids) do
+        self.selection:toggle(id)
+    end
+    return true
+end
+
+-- ── Clipboard ────────────────────────────────────────────────────────────
+
+-- Props can nest tables (a checklist, say), and a clipboard entry has to survive
+-- edits made to the element it was copied from afterwards -- and, on paste, each
+-- pasted element needs its own props table rather than sharing one with the entry
+-- still sitting in the clipboard for the next paste.
+local function cloneProps(props)
+    local copy = {}
+    for key, value in pairs(props) do
+        copy[key] = type(value) == "table" and cloneProps(value) or value
+    end
+    return copy
+end
+
+
+
+-- Copies the selection to the in-app clipboard as plain geometry/type/props data,
+-- deliberately not ids: paste always mints fresh elements rather than risking a
+-- collision with the ones it was copied from, or with a second paste of the same
+-- clipboard. No-ops -- leaving any existing clipboard contents alone -- on an empty
+-- selection, same as deleteSelection.
+--
+-- Copying something that holds other elements takes them along even when they aren't
+-- themselves selected: a container without its contents is an empty box, and the
+-- selection you make when you click a container's title bar is the container. The id
+-- it was copied *from* rides along as `sourceId`, purely so paste can point the copied
+-- arrangement at the copied children rather than at the originals.
+function Board:copySelection(showToast)
+    if showToast == nil then showToast = true end
+    local ids = self.document:selectedIds(self.selection)
+    if #ids == 0 then
+        return false
+    end
+
+    self.clipboard = {}
+    for _, id in ipairs(Containment.withDescendants(self.document, ids)) do
+        local element = self.document:getById(id)
+        table.insert(self.clipboard, {
+            sourceId = id,
+            type = element.type,
+            x = element.x,
+            y = element.y,
+            width = element.width,
+            height = element.height,
+            props = cloneProps(element.props),
+        })
+    end
+
+    if showToast then
+        UI:showToast("info", "Copied " .. countLabel(#self.clipboard, "element"), { timeout = 2 })
+    end
+    return true
+end
+
+function Board:cutSelection(showToast)
+    if showToast == nil then showToast = true end
+    if not self:copySelection(false) then
+        return false
+    end
+    if showToast then
+        UI:showToast("info", "Cut " .. countLabel(#self.clipboard, "element"), { timeout = 2 })
+    end
+    self:deleteSelection(false)
+    return true
+end
+
+-- Pastes the clipboard as new elements, offset so the copied group's top-left corner
+-- (the min x/y across the entries) lands under the pointer, the same real-cursor read
+-- `Canvas:wheelmoved` already relies on for zoom-at-cursor -- rather than stacking
+-- silently on top of the originals. One undo step for however many elements came in
+-- (Composite.of collapses to a single AddElement when it's just one), and the pasted
+-- elements become the selection, the same as a marquee leaves it.
+function Board:pasteClipboard(showToast)
+    if showToast == nil then showToast = true end
+    if not self.clipboard or #self.clipboard == 0 then
+        return false
+    end
+
+    local minX, minY = math.huge, math.huge
+    for _, item in ipairs(self.clipboard) do
+        minX = math.min(minX, item.x)
+        minY = math.min(minY, item.y)
+    end
+
+    local mouseX, mouseY = love.mouse.getPosition()
+    local dx = Canvas:screenToWorldX(mouseX) - minX
+    local dy = Canvas:screenToWorldY(mouseY) - minY
+
+    local commands = {}
+    local newIds = {}
+    local pasted = {}
+    -- Old id -> new id across the whole paste, so an element that stores ids can
+    -- point them at the copies. Built before any of them is remapped, since a
+    -- container may name a child that comes later in the list.
+    local idMap = {}
+    for _, item in ipairs(self.clipboard) do
+        local element = Element.new(item.type, item.x + dx, item.y + dy,
+            item.width, item.height, cloneProps(item.props))
+        table.insert(commands, AddElement.new(element))
+        table.insert(newIds, element.id)
+        table.insert(pasted, element)
+        if item.sourceId then
+            idMap[item.sourceId] = element.id
+        end
+    end
+
+    for _, element in ipairs(pasted) do
+        ElementRegistry:remapIds(element, idMap)
+    end
+
+    self.document:execute(Composite.of(commands))
+
+    self.selection:clear()
+    for _, id in ipairs(newIds) do
+        self.selection:add(id)
+    end
+
+    if showToast then
+        UI:showToast("info", "Pasted " .. countLabel(#newIds, "element"), { timeout = 2 })
+    end
+    return true
+end
+
 -- ── Drawing ──────────────────────────────────────────────────────────────
 
 function Board:update(dt)
@@ -155,6 +352,18 @@ function Board:update(dt)
     -- Windows, so the pulse below would speed up and slow down with load.
     self.time = self.time + dt
     self:pruneSelection()
+
+    -- After this frame's input and before its draw, so an element a container lays
+    -- out follows the container that was just dragged, undone, resized or opened out
+    -- of a file -- none of which needs to know that anything is laid out at all.
+    Containment.layoutAll(self.document)
+
+    -- After Containment's own pass, so a line connecting an element that's itself
+    -- laid out by a container reads that element's already-current rect rather than
+    -- last frame's.
+    for _, element in ipairs(self.document.elements) do
+        ElementRegistry:updateGeometry(element, self.document)
+    end
 end
 
 -- Hoisted rather than closed over the document per call: this runs every frame, and
@@ -191,6 +400,14 @@ end
 function Board:draw()
     local context = self.drawContext
     context.zoom = Canvas.zoom
+    -- An element type that holds other elements needs to look them up to draw itself
+    -- (a container has to know whether it's empty), and only the document can answer
+    -- that -- the element holds ids.
+    context.document = self.document
+
+    -- LineElement reads this to pick its own selected/unselected color -- see
+    -- drawSelectionOutlines for why a line doesn't also get the generic outline.
+    context.selection = self.selection
 
     -- Which label, if any, an element type should leave to the inline editor rather
     -- than drawing itself. Read from the session rather than tracked here, so a
@@ -234,7 +451,10 @@ local pulseColor = Color.new()
 
 -- Drawn generically from each element's rect rather than by the element type
 -- itself, so a new element type is selectable without having to draw its own
--- outline.
+-- outline. A type can opt out via `ownSelectionColor` when the outline would be
+-- redundant or actively wrong -- a line's whole visible extent is its stroke, so it
+-- shows selection by recoloring itself (see LineElement.draw) rather than gaining a
+-- diagonal-spanning bounding-box rectangle nothing else on the board has.
 function Board:drawSelectionOutlines()
     if self.selection:isEmpty() then
         return
@@ -253,7 +473,7 @@ function Board:drawSelectionOutlines()
     local radius = Theme:metric("cornerRadius")
 
     for _, element in ipairs(self.document.elements) do
-        if self.selection:contains(element.id) then
+        if self.selection:contains(element.id) and not ElementRegistry:resolve(element.type).ownSelectionColor then
             love.graphics.rectangle("line",
                 element.x - margin, element.y - margin,
                 element.width + margin * 2, element.height + margin * 2, radius, radius)
@@ -282,6 +502,7 @@ function Board:beginTextEdit(element, field)
         space = WORLD_SPACE,
         font = field.font,
         color = field.color,
+        multiline = field.multiline,
         owner = { id = id, prop = prop },
 
         -- Re-read every frame: the panel behind the field can still be panned and
@@ -344,6 +565,19 @@ function Board:mousepressed(x, y, button, istouch, presses)
         return true
     end
 
+    -- Same "owns the whole canvas before any hit testing" shape as createType, except
+    -- a connector needs somewhere to start from: a press that doesn't land on a valid
+    -- element is a no-op rather than the start of a gesture, since there'd be nothing
+    -- to connect. Still consumed, so it doesn't fall through to a marquee drag.
+    local connectType = Tools:getActive().connectType
+    if connectType then
+        local fromElement = self.document:elementAt(worldX, worldY)
+        if fromElement and fromElement.type ~= connectType then
+            self.gesture = LineGesture.new(self, connectType, fromElement, worldX, worldY)
+        end
+        return true
+    end
+
     local element, handle = self.document:handleAt(worldX, worldY, Canvas.zoom)
 
     if not element then
@@ -353,9 +587,19 @@ function Board:mousepressed(x, y, button, istouch, presses)
 
     -- Resize handles always focus down to the single element being resized;
     -- group-resizing several elements at once isn't supported.
+    --
+    -- An element something else lays out doesn't own its rect, so the handle drags
+    -- the boundary it grabbed within that layout instead (see CellResizeGesture).
+    -- Asked as "does this have a parent", not "is this in a container" -- Board
+    -- doesn't know concrete element types, and containment is the generic question.
     if handle and handle ~= "move" then
         self.selection:set(element.id)
-        self.gesture = ResizeGesture.new(self, element, handle, worldX, worldY)
+        local parent = Containment.parentOf(self.document, element.id)
+        if parent then
+            self.gesture = CellResizeGesture.new(self, parent, element, handle, worldX, worldY)
+        else
+            self.gesture = ResizeGesture.new(self, element, handle, worldX, worldY)
+        end
         return true
     end
 
@@ -367,6 +611,24 @@ function Board:mousepressed(x, y, button, istouch, presses)
         if field then
             self.selection:set(element.id)
             self:beginTextEdit(element, field)
+            return true
+        end
+
+        -- Not a text field: a type gets one more shot at the double-click (an
+        -- image's body, opening the file picker). setProp is bound to the id
+        -- rather than closing over `element` itself, matching beginTextEdit's
+        -- onCommit -- the callback this hands out can fire well after the click,
+        -- from an async file dialog's own callback, by which point undo/redo may
+        -- have moved this element out from under it or dropped it entirely.
+        local id = element.id
+        local handled = ElementRegistry:handleDoubleClick(element, worldX, worldY, function(values)
+            local live = self.document:getById(id)
+            if live then
+                self.document:execute(SetProps.capture(live, values))
+            end
+        end)
+        if handled then
+            self.selection:set(id)
             return true
         end
     end
@@ -427,8 +689,10 @@ function Board:updateHoverCursor(x, y)
     end
 
     -- A creation tool ignores what's under the pointer, so there are no move or
-    -- resize affordances to show -- just the crosshair, everywhere on the canvas.
-    if Tools:getActive().createType then
+    -- resize affordances to show -- just the crosshair, everywhere on the canvas. A
+    -- connect tool shows the same crosshair: it needs an element to start from, but
+    -- once started it's no more a move/resize affordance than a create is.
+    if Tools:getActive().createType or Tools:getActive().connectType then
         Cursor:setForHandle("create")
         return
     end
@@ -514,8 +778,16 @@ function Board:shortcutKeypressed(key)
         if isShiftDown() then Actions.redo() else Actions.undo() end
     elseif key == "y" then
         Actions.redo()
+    elseif key == "x" then
+        Actions.cut()
+    elseif key == "c" then
+        Actions.copy()
+    elseif key == "v" then
+        Actions.paste()
     elseif key == "a" then
-        Actions.selectAll()
+        if isShiftDown() then Actions.deselectAll() else Actions.selectAll() end
+    elseif key == "i" then
+        Actions.invertSelection()
     elseif key == "0" then
         Actions.resetZoom()
     -- Both the unshifted and shifted spellings of the +/- keys, and the keypad's:
