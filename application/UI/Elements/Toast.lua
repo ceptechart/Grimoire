@@ -1,4 +1,5 @@
 local Class = require "lib.util.Class"
+local MathUtil = require "lib.util.math.MathUtil"
 local Theme = require "application.Style.Theme"
 local Widget = require "application.UI.Elements.Widget"
 local Label = require "application.UI.Elements.Label"
@@ -59,12 +60,8 @@ Toast.LEAVING = "leaving"
 Toast.DONE = "done"
 
 -- Eases current toward target rather than snapping, so simultaneous stack reflows
--- read as one smooth motion. dt/duration*4 makes duration read as "time to mostly
--- arrive" rather than a literal asymptote.
-local function approach(current, target, dt, duration)
-    local rate = 1 - math.exp(-dt / duration * 4)
-    return current + (target - current) * rate
-end
+-- read as one smooth motion.
+local approach = MathUtil.approach
 
 local function fadedColor(value, opacity)
     local color = Theme:resolveColor(value)

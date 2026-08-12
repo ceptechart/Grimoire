@@ -1,40 +1,41 @@
 local InputManager = require "application.InputManager"
 local Theme = require "application.Style.Theme"
+local Color = require "lib.util.math.Color"
 local UI = require "application.UI.UI"
+local Actions = require "application.Actions"
 local Canvas = require "application.Canvas.Canvas"
+local Tools = require "application.Canvas.Tools"
 local Document = require "application.Canvas.Document"
 local Selection = require "application.Canvas.Selection"
 local Cursor = require "application.Canvas.Cursor"
-local RectResize = require "application.Canvas.RectResize"
 local ElementRegistry = require "application.Canvas.ElementRegistry"
 local TextEditSession = require "application.Text.TextEditSession"
 local DialogManager = require "application.UI.DialogManager"
 local AddElement = require "application.Canvas.commands.AddElement"
-local MoveElements = require "application.Canvas.commands.MoveElements"
-local ResizeElement = require "application.Canvas.commands.ResizeElement"
-local ReorderElement = require "application.Canvas.commands.ReorderElement"
-local Composite = require "application.Canvas.commands.Composite"
+local RemoveElements = require "application.Canvas.commands.RemoveElements"
 local SetProps = require "application.Canvas.commands.SetProps"
+local MoveGesture = require "application.Canvas.gestures.MoveGesture"
+local ResizeGesture = require "application.Canvas.gestures.ResizeGesture"
+local MarqueeGesture = require "application.Canvas.gestures.MarqueeGesture"
+local CreateGesture = require "application.Canvas.gestures.CreateGesture"
 
 -- The view and controller over a Document: draws its elements through the canvas
--- transform, turns pointer input into selection/move/resize edits, and owns the
--- edit shortcuts.
+-- transform, turns pointer input into edits, and owns the board's shortcuts.
 --
 -- Sits at ELEMENT priority, so UI chrome takes clicks first and canvas panning only
 -- sees what no element wanted.
 --
--- At most one of self.drag / self.resize / self.marquee is active at a time; each
--- is a small table describing the gesture in progress, created in mousepressed,
--- advanced in mousemoved, and resolved into an undo command in mousereleased.
+-- All pointer editing runs through `self.gesture`: at most one at a time, created in
+-- mousepressed, advanced in mousemoved, resolved into an undo command in
+-- mousereleased. Which one a press starts depends on the active tool (see Tools) and
+-- what's under the pointer; what each does afterwards is the gesture's own business
+-- (see gestures/Gesture.lua), so nothing here branches on gesture kind.
 local Board = {}
 
 ElementRegistry:register(require "application.Canvas.elements.PanelElement")
 ElementRegistry:setFallback(require "application.Canvas.elements.UnknownElement")
 
 local DRAG_BUTTON = 1
-
--- Reused rather than rebuilt per frame.
-local drawContext = { zoom = 1 }
 
 -- Element text is drawn under the canvas transform, so an inline editor over it has
 -- to measure and hit-test in world coordinates and keep its hairlines one screen
@@ -61,8 +62,9 @@ local function isCtrlDown()
 end
 
 -- Temporary: the startup board is prefilled so there's something to look at and
--- something to save. Drop it once there's a way to create an element (TODO 2) --
--- File > New already opens an empty board, which is what a new board should be.
+-- something to save. File > New already opens an empty board, and the Panel tool can
+-- fill one, so this is only still here as the quickest way to have content to test
+-- against.
 local function seed(document)
     local titles = { "Design Notes", "Enemy Behaviour", "TODO" }
     for index, title in ipairs(titles) do
@@ -78,8 +80,11 @@ end
 
 function Board:load()
     self.selection = Selection.new()
-    self:setDocument(Document.new())
+    self.time = 0
+    -- Reused rather than rebuilt per frame; refreshed at the top of draw().
+    self.drawContext = { zoom = 1 }
 
+    self:setDocument(Document.new())
     seed(self.document)
 
     InputManager:subscribeAll(InputManager.MOUSE_EVENTS, self, InputManager.PRIORITY.ELEMENT)
@@ -90,10 +95,14 @@ function Board:getDocument()
     return self.document
 end
 
+function Board:getSelection()
+    return self.selection
+end
+
 -- Swaps in a whole new document -- opening a file, or File > New.
 --
 -- Selection and any gesture in progress refer to elements in the outgoing document,
--- so both are dropped: a drag holding ids that no longer exist would keep running
+-- so both are dropped: a gesture holding ids that no longer exist would keep running
 -- against a document that's already gone.
 function Board:setDocument(document)
     -- An open inline editor holds an element id from the outgoing document, and its
@@ -102,27 +111,93 @@ function Board:setDocument(document)
 
     self.document = document
     self.selection:clear()
-    self.drag = nil
-    self.resize = nil
-    self.marquee = nil
-    self.marqueeBase = nil
+    self.gesture = nil
 end
 
-function Board:getSelection()
-    return self.selection
+-- ── Selection edits ──────────────────────────────────────────────────────
+
+-- Deletes every selected element as one undo step. No-ops on an empty selection so
+-- Delete/Backspace and Edit > Delete can call it unconditionally.
+function Board:deleteSelection()
+    local ids = self.document:selectedIds(self.selection)
+    if #ids == 0 then
+        return false
+    end
+
+    self.document:execute(RemoveElements.new(ids))
+    self.selection:clear()
+    return true
+end
+
+function Board:selectAll()
+    -- Replaces rather than unions: "select all" is a statement about the final
+    -- selection, and starting from whatever was already selected can only differ from
+    -- that by leaving stale ids in.
+    self.selection:clear()
+    for _, id in ipairs(self.document:allIds()) do
+        self.selection:add(id)
+    end
+    return not self.selection:isEmpty()
+end
+
+function Board:deselectAll()
+    if self.selection:isEmpty() then
+        return false
+    end
+    self.selection:clear()
+    return true
 end
 
 -- ── Drawing ──────────────────────────────────────────────────────────────
 
+function Board:update(dt)
+    -- Accumulated rather than read off a wall clock: os.clock() is CPU time on
+    -- Windows, so the pulse below would speed up and slow down with load.
+    self.time = self.time + dt
+    self:pruneSelection()
+end
+
+-- Hoisted rather than closed over the document per call: this runs every frame, and
+-- reading the document off Board keeps it correct across a document swap for free.
+local function isLiveElement(id)
+    return Board.document:getById(id) ~= nil
+end
+
+-- Drops selected ids whose element is no longer on the board.
+--
+-- Undo and redo move elements in and out from under the selection -- undoing a create
+-- leaves behind the id of something that doesn't exist any more -- and a stale id is
+-- visible rather than harmless: it inflates the status bar's count, and it would make
+-- a group action quietly touch fewer elements than the count claims.
+--
+-- Unconditional, because there's no cheap signal that says "the document changed in a
+-- way that could have invalidated an id". History's state token is the obvious
+-- candidate and the wrong one: undoing deliberately returns a token the document has
+-- already had, so a check against the last-seen value skips exactly the case this
+-- exists for. A pass over the selected ids is bounded by the selection, not the board.
+function Board:pruneSelection()
+    if self.selection:isEmpty() then
+        return
+    end
+    self.selection:retain(isLiveElement)
+end
+
+-- The context handed to every element type's draw(). Refreshed once per frame at the
+-- top of draw(); a gesture drawing a pending element reads the same one.
+function Board:getDrawContext()
+    return self.drawContext
+end
+
 function Board:draw()
-    drawContext.zoom = Canvas.zoom
+    local context = self.drawContext
+    context.zoom = Canvas.zoom
 
     -- Which label, if any, an element type should leave to the inline editor rather
     -- than drawing itself. Read from the session rather than tracked here, so a
     -- commit triggered by a click anywhere can't leave this stale.
     local editing = TextEditSession:getOwner()
-    drawContext.editingId = editing and editing.id or nil
-    drawContext.editingProp = editing and editing.prop or nil
+    context.editingId = editing and editing.id or nil
+    context.editingProp = editing and editing.prop or nil
 
     love.graphics.push()
     love.graphics.translate(Canvas.offset.x, Canvas.offset.y)
@@ -130,19 +205,32 @@ function Board:draw()
 
     -- Back to front: array order is z-order.
     for _, element in ipairs(self.document.elements) do
-        ElementRegistry:draw(element, drawContext)
+        ElementRegistry:draw(element, context)
+    end
+
+    -- Over the elements but under the selection outlines, which suits both gestures
+    -- that draw: the pending element belongs in front of the board it's about to join,
+    -- and a marquee's tint shouldn't wash out the outlines of what it has picked up.
+    if self.gesture and self.gesture.draw then
+        self.gesture:draw()
     end
 
     self:drawSelectionOutlines()
+
     -- Inside the transform: the field is anchored to an element, so it pans and zooms
     -- with it.
     TextEditSession:drawIn("world")
-    self:drawMarquee()
 
     love.graphics.pop()
 end
 
 local SELECTION_OUTLINE_MARGIN = 3
+-- Radians per second of the outline's colour cycle.
+local SELECTION_PULSE_RATE = 5
+
+-- Written into every frame rather than allocated: this is the one colour on screen
+-- that changes continuously, and Theme's cache can't hold a value that never settles.
+local pulseColor = Color.new()
 
 -- Drawn generically from each element's rect rather than by the element type
 -- itself, so a new element type is selectable without having to draw its own
@@ -154,16 +242,15 @@ function Board:drawSelectionOutlines()
 
     local r, g, b, a = love.graphics.getColor()
     local previousLineWidth = love.graphics.getLineWidth()
-    local margin = SELECTION_OUTLINE_MARGIN / Canvas.zoom
 
-    local scolor1 = Theme:color("selection")
-    local scolor2 = Theme:color("selectionAlt")
-    local scolorlerp = scolor1:lerp(scolor2, (math.sin(os.clock() * 5) + 1)/2.0)
+    local blend = (math.sin(self.time * SELECTION_PULSE_RATE) + 1) / 2
+    local color = Theme:color("selection"):mix(Theme:color("selectionAlt"), blend, pulseColor)
 
-
-    love.graphics.setColor(scolorlerp:unpacked())
+    love.graphics.setColor(color:unpacked())
     love.graphics.setLineWidth(Theme:metric("selectionWidth") / Canvas.zoom)
-    local radius = Theme:metric("cornerRadius") or 0
+
+    local margin = SELECTION_OUTLINE_MARGIN / Canvas.zoom
+    local radius = Theme:metric("cornerRadius")
 
     for _, element in ipairs(self.document.elements) do
         if self.selection:contains(element.id) then
@@ -175,79 +262,6 @@ function Board:drawSelectionOutlines()
 
     love.graphics.setLineWidth(previousLineWidth)
     love.graphics.setColor(r, g, b, a)
-end
-
-function Board:drawMarquee()
-    if not self.marquee then
-        return
-    end
-
-    local minX, maxX = math.min(self.marquee.startX, self.marquee.currentX), math.max(self.marquee.startX, self.marquee.currentX)
-    local minY, maxY = math.min(self.marquee.startY, self.marquee.currentY), math.max(self.marquee.startY, self.marquee.currentY)
-
-    local r, g, b, a = love.graphics.getColor()
-    local previousLineWidth = love.graphics.getLineWidth()
-
-    love.graphics.setColor(Theme:color("marqueeFill"):unpacked())
-    love.graphics.rectangle("fill", minX, minY, maxX - minX, maxY - minY)
-
-    love.graphics.setColor(Theme:color("marqueeBorder"):unpacked())
-    love.graphics.setLineWidth(1 / Canvas.zoom)
-    love.graphics.rectangle("line", minX, minY, maxX - minX, maxY - minY)
-
-    love.graphics.setLineWidth(previousLineWidth)
-    love.graphics.setColor(r, g, b, a)
-end
-
--- ── Gesture setup ────────────────────────────────────────────────────────
-
-function Board:beginMove(worldX, worldY)
-    local ids = self.selection:list()
-    local raised = self.document:raiseAllToFront(ids)
-
-    local origins = {}
-    for _, id in ipairs(ids) do
-        local element = self.document:getById(id)
-        origins[id] = { x = element.x, y = element.y }
-    end
-
-    self.drag = {
-        ids = ids,
-        origins = origins,
-        pointerX = worldX,
-        pointerY = worldY,
-        raised = raised,
-    }
-end
-
-function Board:beginResize(element, handle, worldX, worldY)
-    local minWidth, minHeight = ElementRegistry:minSize(element.type)
-
-    self.resize = {
-        id = element.id,
-        handle = handle,
-        origin = { x = element.x, y = element.y, width = element.width, height = element.height },
-        pointerX = worldX,
-        pointerY = worldY,
-        minWidth = minWidth,
-        minHeight = minHeight,
-        -- Single element, so the simpler count()-based toIndex from the old
-        -- single-drag code is valid here: resizing never adds or removes elements,
-        -- so the element's index right after this raise stays put until release.
-        raisedFrom = self.document:raiseToFront(element.id),
-    }
-end
-
-function Board:beginMarquee(worldX, worldY, additive)
-    self.marqueeBase = additive and self.selection:list() or {}
-    self.marquee = {
-        startX = worldX, startY = worldY,
-        currentX = worldX, currentY = worldY,
-    }
-
-    if not additive then
-        self.selection:clear()
-    end
 end
 
 -- ── Inline text editing ──────────────────────────────────────────────────
@@ -270,7 +284,7 @@ function Board:beginTextEdit(element, field)
         color = field.color,
         owner = { id = id, prop = prop },
 
-        -- Re-read every frame: the panel behind the field can still be scrolled and
+        -- Re-read every frame: the panel behind the field can still be panned and
         -- zoomed under it.
         getRect = function()
             local live = self.document:getById(id)
@@ -295,7 +309,7 @@ end
 -- F2 on a single selected element, the keyboard route to the same thing a
 -- double-click does. Ambiguous for a multi-selection, so it does nothing there.
 function Board:beginTextEditOnSelection()
-    local ids = self.selection:list()
+    local ids = self.document:selectedIds(self.selection)
     if #ids ~= 1 then
         return false
     end
@@ -321,10 +335,19 @@ function Board:mousepressed(x, y, button, istouch, presses)
     local worldY = Canvas:screenToWorldY(y)
     local shiftHeld = isShiftDown()
 
+    -- A creation tool owns the whole canvas: it doesn't matter what's under the
+    -- pointer, so this comes before any hit testing. Elements can still be selected
+    -- and moved by switching back to the select tool.
+    local createType = Tools:getActive().createType
+    if createType then
+        self.gesture = CreateGesture.new(self, createType, worldX, worldY)
+        return true
+    end
+
     local element, handle = self.document:handleAt(worldX, worldY, Canvas.zoom)
 
     if not element then
-        self:beginMarquee(worldX, worldY, shiftHeld)
+        self.gesture = MarqueeGesture.new(self, worldX, worldY, shiftHeld)
         return true
     end
 
@@ -332,7 +355,7 @@ function Board:mousepressed(x, y, button, istouch, presses)
     -- group-resizing several elements at once isn't supported.
     if handle and handle ~= "move" then
         self.selection:set(element.id)
-        self:beginResize(element, handle, worldX, worldY)
+        self.gesture = ResizeGesture.new(self, element, handle, worldX, worldY)
         return true
     end
 
@@ -357,43 +380,42 @@ function Board:mousepressed(x, y, button, istouch, presses)
     -- leave the group as-is so a header drag can move all of it.
 
     if handle == "move" and self.selection:contains(element.id) then
-        self:beginMove(worldX, worldY)
+        self.gesture = MoveGesture.new(self, worldX, worldY)
     end
 
     return true
 end
 
 function Board:mousemoved(x, y, dx, dy, istouch)
-    if self.drag or self.resize or self.marquee then
-        local worldX = Canvas:screenToWorldX(x)
-        local worldY = Canvas:screenToWorldY(y)
-
-        if self.drag then
-            self:updateMove(worldX, worldY)
-        elseif self.resize then
-            self:updateResize(worldX, worldY)
-        else
-            self:updateMarquee(worldX, worldY)
-        end
+    if self.gesture then
+        self.gesture:move(Canvas:screenToWorldX(x), Canvas:screenToWorldY(y))
         return true
     end
 
+    self:updateHoverCursor(x, y)
+    return false
+end
+
+-- Idle hover affordances. Returns nothing useful -- mousemoved is broadcast, so
+-- consuming it wouldn't stop anything anyway; this is only about which cursor the
+-- pointer should be showing.
+function Board:updateHoverCursor(x, y)
     -- A modal dialog owns the pointer everywhere while it's open, not just over its
     -- own rect, so this is a state check rather than a position query like
     -- isPointOverUI below -- same reason TextEditSession gets its own check rather
     -- than going through isPointOverUI too.
     if DialogManager:isOpen() then
         Cursor:reset()
-        return false
+        return
     end
 
-    -- Idle hover: only show resize/move affordances when the pointer isn't sitting
-    -- over the chrome. mousemoved reaches every handler regardless of who consumed
-    -- it (see InputManager's broadcast note), so consumption alone can't tell us
-    -- that -- this is a direct position query against the UI instead.
+    -- Only show affordances when the pointer isn't sitting over the chrome.
+    -- mousemoved reaches every handler regardless of who consumed it (see
+    -- InputManager's broadcast note), so consumption alone can't tell us that --
+    -- this is a direct position query against the UI instead.
     if UI:isPointOverUI(x, y) then
         Cursor:reset()
-        return false
+        return
     end
 
     -- An open field owns the pointer over itself: an I-beam there, and no resize or
@@ -401,155 +423,43 @@ function Board:mousemoved(x, y, dx, dy, istouch)
     -- while the session is swallowing input.
     if TextEditSession:isActive() then
         Cursor:setForHandle(TextEditSession:containsPoint(x, y) and "text" or nil)
-        return false
+        return
+    end
+
+    -- A creation tool ignores what's under the pointer, so there are no move or
+    -- resize affordances to show -- just the crosshair, everywhere on the canvas.
+    if Tools:getActive().createType then
+        Cursor:setForHandle("create")
+        return
     end
 
     local worldX = Canvas:screenToWorldX(x)
     local worldY = Canvas:screenToWorldY(y)
     local _, handle = self.document:handleAt(worldX, worldY, Canvas.zoom)
     Cursor:setForHandle(handle)
-
-    return handle ~= nil
 end
 
-function Board:updateMove(worldX, worldY)
-    local dx = worldX - self.drag.pointerX
-    local dy = worldY - self.drag.pointerY
-
-    for _, id in ipairs(self.drag.ids) do
-        local element = self.document:getById(id)
-        local origin = self.drag.origins[id]
-        if element and origin then
-            element:setPosition(origin.x + dx, origin.y + dy)
-        end
-    end
-end
-
-function Board:updateResize(worldX, worldY)
-    local resize = self.resize
-    local element = self.document:getById(resize.id)
-    if not element then
-        return
-    end
-
-    local dx = worldX - resize.pointerX
-    local dy = worldY - resize.pointerY
-
-    element.x, element.y, element.width, element.height =
-        RectResize.apply(resize.handle, resize.origin, dx, dy, resize.minWidth, resize.minHeight)
-end
-
-function Board:updateMarquee(worldX, worldY)
-    self.marquee.currentX = worldX
-    self.marquee.currentY = worldY
-
-    local minX = math.min(self.marquee.startX, worldX)
-    local maxX = math.max(self.marquee.startX, worldX)
-    local minY = math.min(self.marquee.startY, worldY)
-    local maxY = math.max(self.marquee.startY, worldY)
-
-    self.selection:clear()
-    for _, id in ipairs(self.marqueeBase) do
-        self.selection:add(id)
-    end
-
-    for _, element in ipairs(self.document.elements) do
-        local overlaps = element.x <= maxX and element.x + element.width >= minX
-            and element.y <= maxY and element.y + element.height >= minY
-        if overlaps then
-            self.selection:add(element.id)
-        end
-    end
-end
-
+-- Resolving a gesture is the same three steps whatever it was: clear the slot first
+-- (so anything the command triggers can't find a gesture still half-running), ask it
+-- for its command, and record that command the way it asks to be recorded.
 function Board:mousereleased(x, y, button, istouch, presses)
-    if button ~= DRAG_BUTTON then
+    if button ~= DRAG_BUTTON or not self.gesture then
         return false
     end
 
-    if self.marquee then
-        self.marquee = nil
-        self.marqueeBase = nil
-        return true
-    end
+    local gesture = self.gesture
+    self.gesture = nil
 
-    if self.resize then
-        self:endResize()
-        return true
-    end
-
-    if self.drag then
-        self:endMove()
-        return true
-    end
-
-    return false
-end
-
-function Board:endMove()
-    local drag = self.drag
-    self.drag = nil
-
-    -- One undo step for the whole gesture, so Ctrl+Z returns every moved element to
-    -- where it was -- and to the depth it was at -- when the drag started, rather
-    -- than stepping back through every frame of it or leaving the group raised.
-    --
-    -- Both effects are already in the document: the elements followed the pointer
-    -- live and were raised on grab. So these record without re-applying.
-    local commands = {}
-
-    for _, r in ipairs(drag.raised) do
-        table.insert(commands, ReorderElement.new(r.id, r.fromIndex, r.toIndex))
-    end
-
-    -- The group moves rigidly, so any moved element's own delta represents the
-    -- whole gesture.
-    local sampleId = drag.ids[1]
-    if sampleId then
-        local element = self.document:getById(sampleId)
-        local origin = drag.origins[sampleId]
-        if element and origin then
-            local dx = element.x - origin.x
-            local dy = element.y - origin.y
-            if dx ~= 0 or dy ~= 0 then
-                table.insert(commands, MoveElements.new(drag.ids, dx, dy))
-            end
+    local command, alreadyApplied = gesture:finish()
+    if command then
+        if alreadyApplied then
+            self.document:pushApplied(command)
+        else
+            self.document:execute(command)
         end
     end
 
-    self:pushGesture(commands)
-end
-
-function Board:endResize()
-    local resize = self.resize
-    self.resize = nil
-
-    local commands = {}
-
-    if resize.raisedFrom then
-        table.insert(commands, ReorderElement.new(resize.id, resize.raisedFrom, self.document:count()))
-    end
-
-    local element = self.document:getById(resize.id)
-    if element then
-        local dx = element.x - resize.origin.x
-        local dy = element.y - resize.origin.y
-        local dWidth = element.width - resize.origin.width
-        local dHeight = element.height - resize.origin.height
-        if dx ~= 0 or dy ~= 0 or dWidth ~= 0 or dHeight ~= 0 then
-            table.insert(commands, ResizeElement.new(resize.id, dx, dy, dWidth, dHeight))
-        end
-    end
-
-    self:pushGesture(commands)
-end
-
-function Board:pushGesture(commands)
-    if #commands == 1 then
-        self.document:pushApplied(commands[1])
-    elseif #commands > 1 then
-        self.document:pushApplied(Composite.new(commands))
-    end
+    return true
 end
 
 -- ── Keyboard shortcuts ───────────────────────────────────────────────────
@@ -560,24 +470,64 @@ function Board:keypressed(key, scancode, isrepeat)
         return self:beginTextEditOnSelection()
     end
 
-    -- lgui/rgui so Cmd works if this ever runs on macOS.
-    if not isCtrlDown() then
-        return false
+    -- Delete the selection. Also not a Ctrl shortcut. Doesn't consume on an empty
+    -- selection, so Backspace still falls through to whatever else it might have done.
+    if key == "delete" or key == "backspace" then
+        return Actions.delete()
     end
 
-    if key == "z" then
-        if isShiftDown() then
-            self.document:redo()
-        else
-            self.document:undo()
+    -- lgui/rgui so Cmd works if this ever runs on macOS.
+    if not isCtrlDown() then
+        return self:unmodifiedKeypressed(key)
+    end
+
+    return self:shortcutKeypressed(key)
+end
+
+-- Plain unmodified keys. Safe to claim here because a text field consumes every key
+-- while it's open (see TextEditSession), so these can't fire mid-typing.
+function Board:unmodifiedKeypressed(key)
+    -- Escape backs out one step at a time: first whatever tool is active, then the
+    -- selection. Only consumed when it actually did something.
+    if key == "escape" then
+        if not Tools:isActive(Tools.SELECT) then
+            Tools:reset()
+            return true
         end
+        return Actions.deselectAll()
+    end
+
+    local tool = Tools:forShortcut(key)
+    if tool then
+        Tools:setActive(tool.name)
+        return true
+    end
+
+    return false
+end
+
+-- Ctrl-modified keys. Routed through Actions so the menu items and these shortcuts
+-- can't drift apart; each returns whether it did anything, but the shortcut is
+-- consumed either way -- Ctrl+Z on an empty undo stack is still a claimed key.
+function Board:shortcutKeypressed(key)
+    if key == "z" then
+        if isShiftDown() then Actions.redo() else Actions.undo() end
     elseif key == "y" then
-        self.document:redo()
+        Actions.redo()
+    elseif key == "a" then
+        Actions.selectAll()
+    elseif key == "0" then
+        Actions.resetZoom()
+    -- Both the unshifted and shifted spellings of the +/- keys, and the keypad's:
+    -- Ctrl+= is what "zoom in" actually is on a US layout without reaching for Shift.
+    elseif key == "=" or key == "+" or key == "kp+" then
+        Actions.zoomIn()
+    elseif key == "-" or key == "kp-" then
+        Actions.zoomOut()
     else
         return false
     end
 
-    -- Consume the shortcut whether or not the stack had anything left in it.
     return true
 end
 

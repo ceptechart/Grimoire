@@ -36,8 +36,17 @@ InputManager.MOUSE_EVENTS = {
 -- mousemoved reaches every handler even after one consumes it. Widgets derive
 -- hover state from the pointer position, so a widget the pointer has just left
 -- still needs the event in order to clear that state.
+--
+-- mousereleased is broadcast for the same underlying reason: a handler mid-gesture
+-- (Canvas panning, Board's move/resize/marquee/create, a text selection drag) tracks
+-- "is this happening" in its own state, not by position, and the button going up is
+-- what has to end it -- regardless of whether the pointer is currently over a
+-- higher-priority widget that would otherwise consume the event first. Every such
+-- handler already guards on its own state (self.panning, self.gesture, ...), so the
+-- broadcast is a no-op for handlers that weren't mid-gesture.
 local BROADCAST_EVENTS = {
     mousemoved = true,
+    mousereleased = true,
 }
 
 local subscriptions = {}

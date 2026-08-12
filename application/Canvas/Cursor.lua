@@ -18,6 +18,9 @@ local HANDLE_CURSORS = {
     ["resize-nw"] = "sizenwse",
     ["resize-se"] = "sizenwse",
     ["text"]      = "ibeam",
+    -- Not a hit-tested handle: the pointer state a creation tool holds over the whole
+    -- canvas, since there's nothing under the pointer for it to depend on.
+    ["create"]    = "crosshair",
 }
 
 local function set(systemCursorName)

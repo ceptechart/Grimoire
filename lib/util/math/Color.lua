@@ -28,6 +28,26 @@ function Color:lerp(other, t)
     return Color.fromHSL(lerp(h1, h2, t), lerp(s1, s2, t), lerp(l1, l2, t), lerp(a1, a2, t))
 end
 
+-- Straight-line RGB blend, optionally written into an existing Color instead of
+-- allocating one.
+--
+-- :lerp travels through HSL, which is the right path between distant hues and makes
+-- no visible difference between two shades of the same one. This is the version for
+-- code that runs every frame -- give it a scratch Color to write into and a blend
+-- costs nothing.
+function Color:mix(other, t, out)
+    local r = self.r + (other.r - self.r) * t
+    local g = self.g + (other.g - self.g) * t
+    local b = self.b + (other.b - self.b) * t
+    local a = self.a + (other.a - self.a) * t
+
+    if out then
+        out.r, out.g, out.b, out.a = r, g, b, a
+        return out
+    end
+    return Color.new(r, g, b, a)
+end
+
 function Color:withAlpha(alpha)
     return Color.new(self.r, self.g, self.b, alpha)
 end

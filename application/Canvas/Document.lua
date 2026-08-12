@@ -109,6 +109,35 @@ function Document:count()
     return #self.elements
 end
 
+-- The ids in `selection`, back-to-front in document order.
+--
+-- Selection is a hash set, so iterating it directly yields ids in whatever order Lua
+-- hashed them -- which differs between runs and is invisible until something
+-- order-sensitive depends on it. Anything that inserts, removes or reorders several
+-- elements as one step (delete, raise, and later copy/paste and align) has to have a
+-- defined order, so it comes from here, where order actually means something.
+--
+-- Ids for elements no longer in the document are dropped, which is what makes this
+-- safe to call against a selection that outlived an undo.
+function Document:selectedIds(selection)
+    local ids = {}
+    for _, element in ipairs(self.elements) do
+        if selection:contains(element.id) then
+            ids[#ids + 1] = element.id
+        end
+    end
+    return ids
+end
+
+-- Every id on the board, in the same order. For Select All.
+function Document:allIds()
+    local ids = {}
+    for index, element in ipairs(self.elements) do
+        ids[index] = element.id
+    end
+    return ids
+end
+
 -- Front-to-back, so the topmost element under the point wins.
 function Document:elementAt(x, y)
     for index = #self.elements, 1, -1 do

@@ -1,4 +1,3 @@
-local InputManager = require "application.InputManager"
 local Theme = require "application.Style.Theme"
 local Canvas = require "application.Canvas.Canvas"
 local Board = require "application.Canvas.Board"
@@ -35,6 +34,7 @@ function ApplicationManager:load()
 end
 
 function ApplicationManager:update(dt)
+    Board:update(dt)
     UI:update(dt)
     TextEditSession:update(dt)
     DialogManager:update(dt)

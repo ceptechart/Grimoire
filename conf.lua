@@ -5,6 +5,8 @@ function love.conf(t)
     t.window.minwidth = 600
     t.window.minheight = 450
 
+    t.window.msaa = 8
+
     t.identity = "grimoire"
     t.window.title = "Grimoire"
 end

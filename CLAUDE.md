@@ -20,21 +20,35 @@ There is no build step; LÖVE runs the source tree directly.
 
 - **Run**: `love .` (or `lovec .` for a console window that shows `print()` output) from the repo root.
 - **Debug**: `love . debug` — the second arg triggers `lldebugger` in `main.lua`. VS Code's `.vscode/launch.json` has "Debug" and "Release" configs wired to this (requires the `lua-local` extension and a `love` command on PATH).
-- **No test suite, linter, or formatter is configured.** There's no `package.json`/`rockspec`/CI. Verify changes by running the app and exercising the feature — see "Testing changes" below.
+- **Test**: `lovec . test` runs `tests/smoke.lua`; `lovec . test <name>` runs `tests/<name>.lua`. Use `lovec`, not `love`, or you won't see the output. Exits non-zero if anything failed. No linter or formatter is configured, and there's no CI yet.
 
 ## Testing changes
 
-There's no automated test harness. The working pattern used throughout this project's history is a **scripted smoke test**: temporarily add assertions inside `love.update` in `main.lua` that call `InputManager:dispatch(...)` to simulate input (mouse/keyboard events go through `InputManager`, not directly through `love.mousepressed` etc.), print `PASS`/`FAIL` lines, optionally call `love.graphics.captureScreenshot("name.png")` on a specific frame, then `love.event.quit()`. Run with `lovec .` piped to a log, inspect the screenshot (written to the LÖVE save directory — call `love.filesystem.setIdentity(...)` first to control where), then **revert the scaffolding from `main.lua` before finishing** — it should never be committed.
+`love . test [name]` loads `tests/<name>.lua` (default `smoke`) and drives it through the real frame loop. **`tests/smoke.lua` is the regression suite — run it after any change to the board, the gestures, the commands, or the save format, and add to it when you fix a bug.**
+
+These are integration tests by construction, and that's deliberate rather than a compromise. Most of this codebase only means anything with a graphics context and a running event loop — fonts have widths, `InputManager` dispatches by priority, a gesture spans frames — so a test is the actual app with synthetic input pushed into `InputManager:dispatch(...)`, which is the same door `love.mousepressed` goes through. There's no headless mode and no mocking.
+
+`tests/runner.lua` is the harness: `check`/`eq`/`near` assertions, `press`/`moveTo`/`release`/`drag`/`key` input helpers, `orderOf(document)` for asserting z-order survived a round trip, and `screenshot(name)`. A test file returns an **array of step functions, one run per frame** — which is what lets a test hold a gesture open across frames (press on one, screenshot on the next, release on a third) and see exactly what a user would. Steps run under `pcall`, so one blowing up is a reported failure rather than the end of the run. Screenshots land in the LÖVE save directory, whose path is printed at the end of a run.
+
+This replaced the older workflow of pasting assertions into `love.update` and scrubbing them out again afterwards. The scrubbing was the step that kept losing them, so the scaffolding is a tracked file now — **don't go back to editing `main.lua`.**
 
 ## Architecture
 
 ### Startup and the frame loop
 
-`main.lua` is a thin LÖVE callback shim: every `love.*` callback forwards to either `ApplicationManager` (lifecycle: load/update/draw/resize/quit) or `InputManager:dispatch(event, ...)` (all input). `ApplicationManager` (`application/ApplicationManager.lua`) loads the theme first, then `Canvas`, `Board`, `UI`, `TextEditSession`, `DialogManager`, `BoardFile` in that order — order matters because widgets/elements resolve theme tokens at draw time and expect a theme to already be loaded, and `BoardFile` reads the board's state for the window title (and can itself open a dialog, so `DialogManager` has to exist first too). `DialogManager:draw()` runs last, over everything else including toasts, since a modal has to sit above the whole app.
+`main.lua` is a thin LÖVE callback shim: every `love.*` callback forwards to either `ApplicationManager` (lifecycle: load/update/draw/resize/quit) or `InputManager:dispatch(event, ...)` (all input). Its only other job is the `test` launch argument (see "Testing changes"). `ApplicationManager` (`application/ApplicationManager.lua`) loads the theme first, then `Canvas`, `Board`, `UI`, `TextEditSession`, `DialogManager`, `BoardFile` in that order — order matters because widgets/elements resolve theme tokens at draw time and expect a theme to already be loaded, and `BoardFile` reads the board's state for the window title (and can itself open a dialog, so `DialogManager` has to exist first too). `DialogManager:draw()` runs last, over everything else including toasts, since a modal has to sit above the whole app.
+
+`Board:update` runs before `UI:update`, so the status bar reads a selection that has already had ids for deleted elements pruned out of it that frame (see "Selection ordering"). `Canvas` has no `update` — nothing about pan/zoom animates yet.
+
+### Actions: one implementation per verb (`application/Actions.lua`)
+
+Every editing verb has at least two ways in — a menu item and a keyboard shortcut, and eventually a context menu and a toolbar button — and the failure mode when each wires itself up separately is drift: the menu keeps working after the shortcut changes, or one grows a guard the other doesn't have. So `Actions` holds the implementations (`undo`, `redo`, `delete`, `selectAll`, `deselectAll`, `zoomIn`/`zoomOut`/`resetZoom`) and the menus in `UI.lua` and the shortcuts in `Board:keypressed` are both just callers. **A new verb goes here, not into whichever caller needed it first.**
+
+Each action returns whether it actually did anything, which is what a keyboard handler needs to decide whether to consume the key; menus ignore it. It holds no state and resolves `Board` lazily, because `Board` requires it at load time.
 
 ### Input: priority + consumption, not direct callbacks
 
-`InputManager` (`application/InputManager.lua`) is the only thing that receives raw LÖVE input events. Everything else — UI widgets, the canvas, the board — subscribes via `InputManager:subscribe(event, handler, priority)` or `:subscribeAll(InputManager.MOUSE_EVENTS, handler, priority)`. Handlers are called in descending priority order; returning `true` from a handler **consumes** the event and stops propagation (except `mousemoved`, which is deliberately broadcast to everyone regardless of consumption, so widgets can clear hover state when the pointer leaves them).
+`InputManager` (`application/InputManager.lua`) is the only thing that receives raw LÖVE input events. Everything else — UI widgets, the canvas, the board — subscribes via `InputManager:subscribe(event, handler, priority)` or `:subscribeAll(InputManager.MOUSE_EVENTS, handler, priority)`. Handlers are called in descending priority order; returning `true` from a handler **consumes** the event and stops propagation, except for two events that are always broadcast to every handler regardless of consumption: `mousemoved` (so widgets can clear hover state when the pointer leaves them) and `mousereleased` (so a handler mid-gesture — `Canvas` panning, `Board.gesture`, a `TextEditSession` selection drag — sees the button go up and can end its gesture even when the pointer is currently over a higher-priority widget that would otherwise consume the event first; e.g. releasing a middle-mouse pan or a marquee drag over the toolbar). Each such handler guards on its own state (`self.panning`, `self.gesture`, ...), so the broadcast is a no-op for handlers that weren't mid-gesture.
 
 The event set is keyboard (`keypressed`/`keyreleased`), text (`textinput` for a typed character, already mapped through the OS layout; `textedited` for an in-progress IME composition, which isn't text yet), and pointer (`InputManager.MOUSE_EVENTS`).
 
@@ -43,6 +57,8 @@ Priority tiers (`InputManager.PRIORITY`): `MODAL(400) > POPUP(300) > CHROME(200)
 ### Styling: token-based theming
 
 Widgets and canvas elements never store resolved colors/fonts — they store string tokens (`"surface"`, `"accent"`, `"small"`) and resolve them at draw time via `Theme` (`application/Style/Theme.lua`), which caches against whichever theme table is currently loaded (`application/Style/themes/Dark.lua` — pure data, no `love` calls). Swapping themes is a `Theme:load(newTheme)` call plus a cache clear; nothing needs to be rebuilt. `Theme:resolveColor`/`resolveMetric` accept either a token string or a literal value, so one-off overrides don't require inventing a theme entry.
+
+`Theme:pushOpacity(value)` / `popOpacity()` multiply every color resolved between them, which is how a whole subtree gets drawn as a ghost (the element being dragged out, in `CreateGesture:draw`) without any widget or element type implementing fading itself. It's a global mode rather than a parameter threaded through drawing code precisely *because* colors are resolved here at draw time rather than stored — this is the one choke point they all pass through. Two things follow: the pair must be balanced, and **nothing may cache a resolved color across frames**, which was already true everywhere. Resolving under an opacity allocates, so at rest (`opacity == 1`) it hands back the cached instance untouched.
 
 `application/Style/Clip.lua` is transform-aware scissor clipping: `love.graphics.setScissor` takes window pixels and ignores the transform stack, so world-space code can't hand it a world rect. `Clip.push/pop` converts through the live transform, intersects rather than replaces (so nesting narrows), and restores the previous scissor on pop.
 
@@ -54,14 +70,44 @@ Widgets and canvas elements never store resolved colors/fonts — they store str
 
 Widgets distinguish `getDefaultWidth()` (subclasses override this) from `getWidth()` (applies `minWidth` on top, defined once on `Widget`) so `minWidth` behaves uniformly without every subclass re-implementing the clamp.
 
-`application/UI/UI.lua` builds the actual chrome (menu bar, status bar, File menu) in `UI:load()`, not at module/require time — this guarantees the theme is loaded first and makes the chrome rebuildable later without restarting.
+`application/UI/UI.lua` builds the actual chrome (menu bar, status bar, File menu, tool palette) in `UI:load()`, not at module/require time — this guarantees the theme is loaded first and makes the chrome rebuildable later without restarting.
+
+`ToolBar` (`Elements/ToolBar.lua`) is the tool palette's container: a column of buttons with a toggle pinned above it. Collapsing slides the column sideways off the screen edge rather than folding it up, so the screen edge does the clipping and there's no scissor to manage; `layout()` positions items from the same animated offset `draw()` uses, so a half-open column hit-tests against what's actually on screen. Unlike other containers it is *not* an opaque surface — its `containsPoint` is true only over a button, since the palette is separate floating circles and the gaps between them belong to the canvas. That's also what makes a collapsed palette transparent to input with no special case: its buttons are off screen, so nothing contains the pointer. It stays generic — which tool a button selects, and which one is current, is wired in `UI.lua`.
+
+A circular button is a square `Button` whose panel corner radius is half its side, with `Label:withIconSize` fixing the icon's size (a label with no text has no line height to match) — so the button's rect is exactly icon + padding. `Button.selected` is a second axis over the three interaction states, for a button that represents a current choice rather than an action; it's pushed from outside every frame rather than toggled on press, because a tool picked by keyboard shortcut has to light up the same button a click would have.
 
 ### Canvas and Board: pan/zoom vs. content
 
 These are two separate systems, both drawn by `ApplicationManager`:
 
-- **`Canvas`** (`application/Canvas/Canvas.lua`) owns pan/zoom state and the background grid only. `worldToScreen*`/`screenToWorld*` convert between spaces. Panning is middle-mouse-drag (uses `love.mouse.setRelativeMode` while panning); zoom is mouse-wheel, keeping the world point under the cursor fixed.
-- **`Board`** (`application/Canvas/Board.lua`) owns the document's content and all element-level interaction (select/move/resize/marquee), drawn inside a `love.graphics.push()/translate(Canvas.offset)/scale(Canvas.zoom)/pop()` block so element code always works in world coordinates.
+- **`Canvas`** (`application/Canvas/Canvas.lua`) owns pan/zoom state and the background grid only. `worldToScreen*`/`screenToWorld*` convert between spaces. Panning is middle-mouse-drag (uses `love.mouse.setRelativeMode` while panning); zoom is mouse-wheel, keeping the world point under the cursor fixed. `zoomIn`/`zoomOut`/`resetZoom` are the pointerless entry points for the keyboard and the View menu — they anchor to the middle of the window instead, and use a much larger step than a wheel notch because one keypress is one deliberate step.
+- **`Board`** (`application/Canvas/Board.lua`) owns the document's content and all element-level interaction, drawn inside a `love.graphics.push()/translate(Canvas.offset)/scale(Canvas.zoom)/pop()` block so element code always works in world coordinates.
+
+### Gestures: what a left-drag on the canvas does (`application/Canvas/gestures/`)
+
+All pointer editing runs through **`Board.gesture`, exactly one at a time**: created in `mousepressed`, advanced by `move(worldX, worldY)` on every `mousemoved`, resolved in `mousereleased`. Nothing in `Board` branches on which kind of gesture is in flight — that was four parallel state machines threaded through three methods, and it's the shape a new gesture (space-pan, drawing a connector, group-resize) would have had to be added to in three places.
+
+A gesture (`gestures/Gesture.lua`) implements:
+
+- `update()` — advance the live edit.
+- `finish()` → `command, alreadyApplied`. `command` may be nil for a gesture that changed nothing undoable (a marquee, or a drag that ended where it started).
+- `draw()` — optional, called inside the canvas transform, for anything on screen that isn't already an element.
+
+**`alreadyApplied` is the drag/create split.** `MoveGesture` and `ResizeGesture` mutate their elements live every frame so they follow the pointer, so their command records a change already in the document → `pushApplied`. `CreateGesture` builds its element outside the document entirely and only adds it on release, so its command is the change happening for the first time → `execute`. `Composite.of(commands)` collapses a gesture's command list — nil for none, the command itself for one, a `Composite` for several — so a drag that both raised and moved is one Ctrl+Z.
+
+Gestures capture the document at construction, which is safe because swapping documents drops the gesture (`Board:setDocument`).
+
+The two that draw both render **over the elements but under the selection outlines**: the pending element belongs in front of the board it's about to join, and a marquee's tint shouldn't wash out the outlines of what it has picked up.
+
+### Tools: which gesture a press starts
+
+`Tools` (`application/Canvas/Tools.lua`) holds the list of pointer tools and which one is active. It's pure data plus one variable — no `love` calls and no requires — so `Board` (which reads `getActive()`) and `UI` (which builds the palette from `list()`) can both depend on it without a cycle. Icons are stored as *paths* and loaded by whoever draws them, the same way theme files hold font paths rather than `Font`s.
+
+`select` is the default: it picks between move/resize/marquee by what's under the pointer. A tool carrying a **`createType`** instead starts a `CreateGesture` for that element type, so **a tool for a new element type is one entry in `Tools.lua`** — `Board` branches on that field, never on a tool's name. The rest of the definition is `name` / `label` / `icon` / an optional single-key `shortcut` (unmodified keys, handled in `Board:keypressed`; safe because an open `TextEditSession` consumes every key). Escape backs out one step at a time — first the active tool, then the selection — and is only consumed when it actually did something.
+
+`CreateGesture` builds the element up front and reshapes it live, so the preview *is* the element that gets added — drawn through its own type definition rather than as an outline, so there's no second construction step that could disagree with what the drag showed. The fade is `Theme:pushOpacity` (see "Styling"), so the ghost costs a new element type nothing.
+
+`CreateGesture:getRect(clamped)` is the single piece of geometry both ends share, and `clamped` is the whole difference between them: **the preview is the pointer's rect and nothing else — sub-minimum sizes included, starting from empty on press — and every size rule lands once at release**, when the element becomes real. Those rules are the type's `minSize()`, and a rect under `CLICK_THRESHOLD` *screen* pixels in both directions counting as a click and yielding `defaultSize()` at the press point instead. Deciding either mid-drag is what made the preview jump between a sliver and a full-sized panel, so the rule is that nothing but the pointer moves it. The press point stays on a corner whichever way the drag went, so a rect the clamp had to grow extends away from it rather than back past the pointer.
 
 ### The element model (`application/Canvas/`)
 
@@ -74,6 +120,16 @@ This is the part designed for extensibility — read this before adding a new ca
 - **`RectResize`** (`RectResize.lua`) is shared edge/corner hit-testing and clamped resize math, used by any rectangular element type (currently just `PanelElement`) so resize behavior doesn't get reimplemented per type.
 - **`Selection`** (`Selection.lua`) is intentionally *not* part of `Document` — it's view state (what's currently selected), not board content, so it isn't serialized and isn't on the undo stack.
 
+#### Selection ordering, and why it isn't `Selection`'s job
+
+`Selection` is a membership set and nothing more: it holds ids, tracks its own `count()` (the status bar asks every frame), and **deliberately cannot be iterated in any meaningful order.** The only way out is `Document:selectedIds(selection)`, which returns them **back-to-front in document order**.
+
+That split exists because a hash set's iteration order is arbitrary and differs between runs, so anything order-sensitive built on it works until it doesn't. This was a live bug: `RemoveElements` recorded each removal's index against the array as it stood at that moment, and reverting forwards through that list put elements back at the wrong depth — and, when a high index happened to come out of the hash first, wrote past the end of a now-shorter array and left a hole in it. The command now reverts backwards (the only order that's a true inverse), *and* the ids reach it in document order. Anything that inserts, removes or reorders several elements at once — copy/paste, align, z-order commands — needs the same treatment.
+
+`Document:selectedIds` also drops ids whose element is gone, which is what makes it safe against a selection that outlived an undo. That's belt-and-braces on top of `Board:pruneSelection`, which runs every frame and drops those ids from the selection itself — undo/redo move elements in and out from under the selection (undoing a create leaves the id of something that no longer exists), and a stale id inflates the status bar's count. It's unconditional because there is no cheap "did anything change" signal that works here: `History:getStateToken()` is the obvious candidate and the wrong one, since undoing deliberately returns a token the document has already had.
+
+`Selection:retain(predicate)` is the one iteration primitive, and it's narrow on purpose — handing the set out would let a caller mutate it behind the tracked count.
+
 ### Commands and undo/redo (`application/Canvas/commands/`, `History.lua`)
 
 Every command implements `apply(document)` / `revert(document)` and must be an exact, idempotent inverse. Commands store **deltas and element ids**, never absolute state or object references, so they stay valid across an undo/redo cycle that removed and re-inserted an element.
@@ -82,11 +138,13 @@ Two ways to record a command, because interactive drags and one-shot edits diffe
 - `Document:execute(command)` — applies then records. For actions where the change hasn't happened yet (menu items, etc.).
 - `Document:pushApplied(command)` — records a change that's *already* in the document. Used after a drag/resize gesture, where the element was mutated live every frame so it visually follows the pointer; re-applying the finished command would double the effect.
 
-`Composite` (`commands/Composite.lua`) bundles several commands into one undo step (applies forward, reverts backward) — e.g. a drag that both raises an element's z-order and moves it is one `Composite` so a single Ctrl+Z undoes both together. Existing commands (`MoveElements`, `ReorderElement`) are written generically enough (they take id *lists*) that multi-select group-move reuses them as-is rather than needing new "multi" variants.
+`Composite` (`commands/Composite.lua`) bundles several commands into one undo step (applies forward, reverts backward) — e.g. a drag that both raises an element's z-order and moves it is one `Composite` so a single Ctrl+Z undoes both together. Existing commands (`MoveElements`, `ReorderElement`) are written generically enough (they take id *lists*) that multi-select group-move reuses them as-is rather than needing new "multi" variants. `Composite.of(commands)` is how a caller that assembled a list should build one: nil for an empty list, the command itself for one, a `Composite` for several.
+
+**A command over several elements must revert in reverse order.** `RemoveElements` records each removal's index against the array as it stood at that moment, so the last removal is the only index still valid against the array as it is now; putting that element back restores the state the previous removal was recorded against, and so on. Replaying forwards corrupts z-order and can write past the end of the array. Same rule `Composite` follows, for the same reason.
 
 `SetProps` (`commands/SetProps.lua`) is the generic prop editor — a title rename, a note body, a color override. Props are arbitrary values rather than numbers, so unlike `MoveElements` there's no delta: it stores old and new values, both captured up front (`SetProps.capture(element, newValues)` reads the old ones off the element). `SetProps.NONE` is the sentinel for "this prop wasn't set", since a Lua table can't store `nil` — which is what makes *adding* a prop undoable.
 
-Keyboard shortcuts: Ctrl+Z undo, Ctrl+Shift+Z or Ctrl+Y redo, wired in `Board:keypressed`.
+Keyboard shortcuts live in `Board:keypressed`, split into `unmodifiedKeypressed` (Escape, tool shortcuts) and `shortcutKeypressed` (Ctrl-modified), and route through `Actions`: Ctrl+Z undo, Ctrl+Shift+Z / Ctrl+Y redo, Ctrl+A select all, Ctrl+0 reset zoom, Ctrl+`=`/`-` zoom. Delete/Backspace and F2 are checked first, before the Ctrl test, since they aren't modified.
 
 ### Text editing (`application/Text/`)
 
@@ -112,7 +170,7 @@ While a field is open the element must not draw that label itself, or the old va
 
 `DialogManager:confirm({ title, message, buttons = { { label, style, default, cancel, onPress }, ... } })` is the app's own replacement for `love.window.showMessageBox` — built from the same `Widget`/`Label`/`Button`/`Panel` pieces as the rest of the UI, so it matches the theme instead of the OS's. `style` is `"primary"` (the recommended action), `"danger"` (a destructive one — discarding unsaved work), or `"secondary"` (the default); `default`/`cancel` mark which button Enter/Escape trigger, the same vocabulary `showMessageBox`'s `enterbutton`/`escapebutton` used.
 
-At most one dialog at a time, the same invariant `TextEditSession` keeps for text fields and for the same reason: `PRIORITY.MODAL` exists to give one thing an unambiguous turn at demanding an answer, and `DialogManager` sits there too, consuming every event unconditionally while a dialog is open (mouse *and* keyboard) — that's what "blocks input beneath, dims the canvas" means for something modal. `confirm()` calls `TextEditSession:commit()` before opening, so the two MODAL residents never actually overlap: a dialog always finds any open field already closed rather than fighting it for the tier.
+At most one dialog at a time, the same invariant `TextEditSession` keeps for text fields and for the same reason: `PRIORITY.MODAL` exists to give one thing an unambiguous turn at demanding an answer, and `DialogManager` sits there too, consuming every event unconditionally while a dialog is open (mouse *and* keyboard) — that's what "blocks input beneath, dims the canvas" means for something modal. The one thing consumption can't stop is a broadcast event, so a `mousemoved`/`mousereleased` still reaches everything below; that's harmless precisely because a dialog blocks the `mousepressed` that would have started a gesture, so there's never one in flight to disturb. `confirm()` calls `TextEditSession:commit()` before opening, so the two MODAL residents never actually overlap: a dialog always finds any open field already closed rather than fighting it for the tier.
 
 **Every dialog is asynchronous** — `love.window.showMessageBox` blocked until answered, but a dialog built from the widget tree can only be answered on some later frame's input dispatch. Each button's `onPress` in the options table is wrapped to call `close()` first, so callers never have to remember to; `BoardFile:guardUnsaved`'s `continue` continuation already assumed a callback could be delayed (Save could already lead to an async `showFileDialog`), so switching it over to `DialogManager:confirm` needed no restructuring — see "Persistence" below.
 
@@ -136,6 +194,8 @@ The shape of the file is `{ "version": <int>, "elements": [ ... ] }`, one object
 
 - **Board files live outside the LÖVE save directory**, so `love.filesystem` can't touch them (it only writes inside the identity folder). Plain `io.*` is used instead, which LÖVE leaves unsandboxed.
 - **`love.window.showFileDialog` is asynchronous** — it returns immediately and calls back with `(files, filtername, errorstring)` later. Anything that must happen *after* a save takes a continuation, which is why `save`/`saveAs` take an `onDone(saved)` and `guardUnsaved(action, continue)` doesn't return a boolean.
+
+**Saves are atomic** (`writeFileAtomic`): the content goes to a `.tmp` alongside the target and only replaces it once it's completely on disk, so a crash or a full disk partway through can't truncate the user's only copy. The swap is three renames rather than one because `os.rename` won't overwrite an existing file on Windows — the target has to move aside first, so it's kept as a `.bak` and renamed back if the swap fails, rather than deleted up front. Both temporaries are cleaned up on every path.
 
 Dirty tracking compares `History:getStateToken()` — the command on top of the undo stack, which identifies the whole edit sequence — against the token taken at save time. That's deliberately not a monotonic counter or a manual flag: it means undoing back to the state that was written reports clean again. Shown as a trailing `*` in the window title and the status bar.
 

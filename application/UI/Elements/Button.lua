@@ -6,6 +6,12 @@ local Widget = require "application.UI.Elements.Widget"
 -- Only the panel (and optionally the text color) differs between states, so the
 -- label is built once rather than once per state. The button's rect is the label's
 -- rect: the label carries the padding, and the state panel is drawn behind it.
+--
+-- `selected` is a second axis over the top of the three interaction states, for
+-- buttons that represent a current choice rather than a one-shot action (a toolbar's
+-- active tool). It's set from outside rather than toggled on press, so whatever owns
+-- the choice stays the single source of truth -- a tool picked by keyboard shortcut
+-- has to light up the same button a click would have.
 local Button = Class.extend(Widget)
 
 Button.DEFAULT = "default"
@@ -18,8 +24,11 @@ function Button.new(label)
     button.label = label
     button.state = Button.DEFAULT
     button.pressed = false
+    button.selected = false
     button.statePanels = {}
+    button.selectedPanels = {}
     button.stateColors = {}
+    button.selectedColor = nil
 
     return button
 end
@@ -55,6 +64,30 @@ function Button:withStateColor(state, color)
     return self
 end
 
+function Button:withSelected(selected)
+    self.selected = selected and true or false
+    return self
+end
+
+-- The selected look, per interaction state. A state with no selected panel of its
+-- own falls back to the selected default rather than to the unselected state panel,
+-- so hovering the active tool doesn't make it look inactive.
+function Button:withSelectedStatePanel(state, panel)
+    self.selectedPanels[state] = panel
+    return self
+end
+
+function Button:withSelectedPanel(panel)
+    return self:withSelectedStatePanel(Button.DEFAULT, panel)
+end
+
+-- Wins over every stateColor while selected: being the current choice matters more
+-- than being hovered.
+function Button:withSelectedColor(color)
+    self.selectedColor = color
+    return self
+end
+
 function Button:withOnPress(callback)
     self.onPress = callback
     return self
@@ -73,7 +106,20 @@ end
 -- Falls back to the plain panel, so a button with no per-state panels still has a
 -- background if one was set via withPanel.
 function Button:getPanel()
+    if self.selected then
+        return self.selectedPanels[self.state]
+            or self.selectedPanels[Button.DEFAULT]
+            or self.statePanels[self.state]
+            or self.panel
+    end
     return self.statePanels[self.state] or self.panel
+end
+
+function Button:getLabelColor()
+    if self.selected and self.selectedColor then
+        return self.selectedColor
+    end
+    return self.stateColors[self.state]
 end
 
 function Button:getDefaultWidth()
@@ -90,7 +136,7 @@ function Button:draw()
         panel:draw(self.position.x, self.position.y, self:getWidth(), self:getHeight())
     end
 
-    local stateColor = self.stateColors[self.state]
+    local stateColor = self:getLabelColor()
     if stateColor then
         local previousColor = self.label.color
         self.label.color = stateColor

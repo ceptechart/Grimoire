@@ -9,13 +9,26 @@ end
 local ApplicationManager = require "application.ApplicationManager"
 local InputManager = require "application.InputManager"
 
+-- `love . test [name]` runs tests/<name>.lua (default "smoke") against the real app
+-- instead of waiting for a user, then quits with a non-zero status if anything
+-- failed. The app loads exactly as normal -- the runner only supplies the input.
+local testRunner = arg[2] == "test" and require "tests.runner" or nil
+
 -- LOVE 2D CALLBACKS --
 function love.load()
     ApplicationManager:load()
+
+    if testRunner then
+        testRunner.load(arg[3])
+    end
 end
 
 function love.update(dt)
     ApplicationManager:update(dt)
+
+    if testRunner then
+        testRunner.update()
+    end
 end
 
 function love.draw()

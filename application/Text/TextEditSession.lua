@@ -38,8 +38,8 @@ TextEditSession.SCREEN = {
 }
 
 -- How far the field's box extends past the text rect it's given.
-local FIELD_PADDING_X = 4
-local FIELD_PADDING_Y = 3
+local FIELD_PADDING_X = 0
+local FIELD_PADDING_Y = 0
 
 local CARET_BLINK = 0.53
 local SELECT_BUTTON = 1
@@ -293,14 +293,14 @@ function TextEditSession:drawIn(space)
     -- can type into.
     local boxX, boxY = x - FIELD_PADDING_X, y - FIELD_PADDING_Y
     local boxWidth, boxHeight = width + FIELD_PADDING_X * 2, height + FIELD_PADDING_Y * 2
-    local radius = Theme:metric("cornerRadius")
+    local radius = 0
 
     love.graphics.setColor(Theme:color("editFieldSurface"):unpacked())
     love.graphics.rectangle("fill", boxX, boxY, boxWidth, boxHeight, radius, radius)
 
-    love.graphics.setColor(Theme:color("editFieldBorder"):unpacked())
-    love.graphics.setLineWidth(pixel)
-    love.graphics.rectangle("line", boxX, boxY, boxWidth, boxHeight, radius, radius)
+    --love.graphics.setColor(Theme:color("editFieldBorder"):unpacked())
+    --love.graphics.setLineWidth(pixel/2)
+    --love.graphics.rectangle("line", boxX, boxY, boxWidth, boxHeight, radius, radius)
 
     -- Everything from here is scrolled, so it has to stop at the field's edges.
     Clip.push(x, y, width, height)

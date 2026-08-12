@@ -79,6 +79,61 @@ local function writeFile(path, text)
     return true
 end
 
+local function fileExists(path)
+    local file = io.open(path, "rb")
+    if not file then
+        return false
+    end
+    file:close()
+    return true
+end
+
+-- Writes `text` to `path` without ever leaving the user's only copy half-written.
+--
+-- Opening the destination directly and writing into it is the failure this exists to
+-- avoid: a crash, a full disk or a lost network share partway through truncates the
+-- board to whatever made it out. So the new content goes to a temporary file first
+-- and only replaces the old one once it's completely on disk.
+--
+-- The swap is three renames rather than one because os.rename won't overwrite an
+-- existing file on Windows -- the destination has to be moved aside first. That
+-- introduces the one moment when nothing is at `path`, so the displaced original is
+-- kept as a backup and put back if the swap fails, rather than deleted up front.
+local function writeFileAtomic(path, text)
+    local tempPath = path .. ".tmp"
+    local backupPath = path .. ".bak"
+
+    local written, writeErr = writeFile(tempPath, text)
+    if not written then
+        os.remove(tempPath)
+        return false, writeErr
+    end
+
+    local hadOriginal = fileExists(path)
+    if hadOriginal then
+        os.remove(backupPath)
+        local movedAside, moveErr = os.rename(path, backupPath)
+        if not movedAside then
+            os.remove(tempPath)
+            return false, moveErr or "the existing file could not be replaced"
+        end
+    end
+
+    local renamed, renameErr = os.rename(tempPath, path)
+    if not renamed then
+        -- The board is still intact in the backup; put it back so the failed save
+        -- leaves the file exactly as it was.
+        if hadOriginal then
+            os.rename(backupPath, path)
+        end
+        os.remove(tempPath)
+        return false, renameErr or "could not be written"
+    end
+
+    os.remove(backupPath)
+    return true
+end
+
 function BoardFile:load()
     Board = require "application.Canvas.Board"
     UI = require "application.UI.UI"
@@ -223,7 +278,7 @@ function BoardFile:saveTo(path, onDone)
     end
 
     -- Trailing newline: it's a text file, and git prefers one.
-    local written, writeErr = writeFile(path, text .. "\n")
+    local written, writeErr = writeFileAtomic(path, text .. "\n")
     if not written then
         fail(("Could not save %s: %s"):format(baseName(path), writeErr))
         if onDone then onDone(false) end

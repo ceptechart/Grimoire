@@ -7,7 +7,11 @@ local Canvas = {}
 
 local MIN_ZOOM = 0.1
 local MAX_ZOOM = 8
+-- Per wheel notch. Small, because a wheel delivers a lot of them.
 local ZOOM_STEP = 1.05
+-- Per keypress or menu click, where one input is one deliberate step and 5% wouldn't
+-- look like anything happened.
+local ZOOM_KEY_STEP = 1.25
 local PAN_BUTTON = 3
 
 local BASE_GRID_SPACING = 32
@@ -136,6 +140,28 @@ function Canvas:zoomAt(screenX, screenY, factor)
     self.zoom = math.max(MIN_ZOOM, math.min(MAX_ZOOM, self.zoom * factor))
 
     self.offset:set(screenX - worldX * self.zoom, screenY - worldY * self.zoom)
+end
+
+-- Zoom without a pointer position to anchor to -- a keyboard shortcut or a View menu
+-- item. Anchored to the middle of the window instead, so whatever you were looking at
+-- stays roughly where it was.
+function Canvas:zoomByStep(factor)
+    local width, height = love.graphics.getDimensions()
+    self:zoomAt(width / 2, height / 2, factor)
+end
+
+function Canvas:zoomIn()
+    self:zoomByStep(ZOOM_KEY_STEP)
+end
+
+function Canvas:zoomOut()
+    self:zoomByStep(1 / ZOOM_KEY_STEP)
+end
+
+-- Back to 1:1 without recentering: "reset zoom" is about scale, and quietly panning
+-- as well would lose the user's place on the board.
+function Canvas:resetZoom()
+    self:zoomByStep(1 / self.zoom)
 end
 
 function Canvas:wheelmoved(x, y)

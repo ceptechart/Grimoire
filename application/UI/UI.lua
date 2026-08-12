@@ -4,8 +4,12 @@ local Label = require "application.UI.Elements.Label"
 local Button = require "application.UI.Elements.Button"
 local MenuBar = require "application.UI.Elements.MenuBar"
 local VerticalMenu = require "application.UI.Elements.VerticalMenu"
+local ToolBar = require "application.UI.Elements.ToolBar"
 local ToastManager = require "application.UI.ToastManager"
+local DialogManager = require "application.UI.DialogManager"
 local Canvas = require "application.Canvas.Canvas"
+local Tools = require "application.Canvas.Tools"
+local Actions = require "application.Actions"
 -- Both lazily required: Board requires UI, so requiring either here at load time
 -- would be a circular require. Board is resolved in updateStatusBar, BoardFile in
 -- UI:load() -- by then every module in the cycle is loaded.
@@ -20,10 +24,48 @@ local BoardFile
 local UI = {}
 
 local APP_NAME = "Grimoire"
+local APP_VERSION = "0.1.0"
+
+-- Help > About. A confirm dialog with a single button is the only dialog shape there
+-- is so far -- worth a plain alert variant if a second one of these turns up.
+local function showAboutDialog()
+    DialogManager:confirm({
+        title = ("%s %s"):format(APP_NAME, APP_VERSION),
+        message = "A local-first bulletin board for game projects.\n\n"
+            .. "Boards are saved as plain JSON with a .grimoire extension, "
+            .. "meant to live in the repository alongside the rest of the project.",
+        buttons = {
+            { label = "Close", style = "primary", default = true, cancel = true },
+        },
+    })
+end
+
+-- Tool palette geometry. The buttons are circles, so the button size is a diameter
+-- and the icon is inset by half the difference; the toggle above them is smaller so
+-- it reads as chrome rather than as another tool.
+local TOOL_BUTTON_SIZE = 40
+local TOOL_ICON_SIZE = 22
+local TOGGLE_BUTTON_SIZE = 26
+local TOGGLE_ICON_SIZE = 14
+-- Distance from the screen's left edge and from the menu bar above.
+local TOOL_MARGIN = 12
+local TOOL_SPACING = 8
+
+-- A circular button background: a square panel whose corner radius is half its side.
+-- Borderless, so a button's size is exactly icon + padding with nothing to inset for,
+-- and shadowed because these float over the board rather than sitting in a bar.
+local function circlePanel(color, size)
+    return Panel.new()
+        :withColor(color)
+        :withLineWeight(0)
+        :withCornerRadius((size or TOOL_BUTTON_SIZE) / 2)
+        :withShadow(true)
+end
 
 local panels
 local topMenuBar
 local statusBar
+local toolBar
 local menus
 
 -- Drawn back to front. Menus come last so they overlay the bars that open them.
@@ -48,6 +90,18 @@ local function buildPanels()
         buttonPress = Panel.new()
             :withColor("surfacePress")
             :withLineWeight(0),
+
+        tool              = circlePanel("toolSurface"),
+        toolHover         = circlePanel("toolSurfaceHover"),
+        toolPress         = circlePanel("toolSurfacePress"),
+        toolSelected      = circlePanel("toolSelected"),
+        toolSelectedHover = circlePanel("toolSelectedHover"),
+
+        -- Same three states at the toggle's smaller diameter: the radius has to be
+        -- half of *its* side or the circle comes out as a rounded square.
+        toolToggle      = circlePanel("toolSurface", TOGGLE_BUTTON_SIZE),
+        toolToggleHover = circlePanel("toolSurfaceHover", TOGGLE_BUTTON_SIZE),
+        toolTogglePress = circlePanel("toolSurfacePress", TOGGLE_BUTTON_SIZE),
     }
 end
 
@@ -60,12 +114,6 @@ end
 
 local function barButton(text)
     return Button.new(barLabel(text))
-        :withHoverPanel(panels.buttonHover)
-        :withPressPanel(panels.buttonPress)
-end
-
-local function barIconButton(icon)
-    return Button.new(barLabel(""):withFont("medium"):withIcon(icon))
         :withHoverPanel(panels.buttonHover)
         :withPressPanel(panels.buttonPress)
 end
@@ -132,37 +180,111 @@ local function buildTopMenuBar()
     })
     table.insert(menus, fileMenu)
 
+    -- Every item below goes through Actions, which is also what Board's keyboard
+    -- shortcuts call -- menu and keyboard are two doors onto one implementation.
+    -- Cut/Copy/Paste aren't here because they don't exist yet (TODO 2); an item that
+    -- silently does nothing is worse than one that isn't offered.
     local editMenu = buildDropdown(editButton, {
-        { "Undo", function() print("Undo pressed!") end },
-        { "Redo", function() print("Redo pressed!") end },
-        { "Cut", function() print("Cut pressed!") end },
-        { "Copy", function() print("Copy pressed!") end },
-        { "Paste", function() print("Paste pressed!") end },
-        { "Delete", function() print("Delete pressed!") end },
+        { "Undo", Actions.undo },
+        { "Redo", Actions.redo },
+        { "Select All", Actions.selectAll },
+        { "Delete", Actions.delete },
     })
     table.insert(menus, editMenu)
 
     local viewMenu = buildDropdown(viewButton, {
-        { "Zoom In", function() print("Zoom In pressed!") end },
-        { "Zoom Out", function() print("Zoom Out pressed!") end },
-        { "Reset Zoom", function() print("Reset Zoom pressed!") end },
+        { "Zoom In", Actions.zoomIn },
+        { "Zoom Out", Actions.zoomOut },
+        { "Reset Zoom", Actions.resetZoom },
     })
     table.insert(menus, viewMenu)
 
     local helpMenu = buildDropdown(helpButton, {
-        { "Documentation", function() print("Documentation pressed!") end },
-        { "About", function() print("About pressed!") end },
+        { "About", showAboutDialog },
     })
     table.insert(menus, helpMenu)
+end
+
+-- The tool palette down the left edge. Buttons are built from Tools:list(), so a new
+-- tool is an entry in Tools.lua and nothing here changes.
+local toolButtons
+local toggleOpenIcon
+local toggleCloseIcon
+
+-- A round icon button: the icon at a fixed size, centred by padding that makes the
+-- whole thing square, on a circular panel.
+local function circleButton(icon, size, iconSize, statePanels)
+    local padding = (size - iconSize) / 2
+
+    local label = Label.new("")
+        :withIcon(icon)
+        :withIconSize(iconSize)
+        :withColor("toolIcon")
+        :withPadding(padding, padding)
+
+    return Button.new(label)
+        :withPanel(statePanels.default)
+        :withHoverPanel(statePanels.hover)
+        :withPressPanel(statePanels.press)
+        :withStateColor(Button.HOVER, "toolIconHover")
+end
+
+local function buildToolBar()
+    toggleOpenIcon = love.graphics.newImage("res/img/tool/open.png")
+    toggleCloseIcon = love.graphics.newImage("res/img/tool/close.png")
+
+    toolBar = ToolBar.new()
+        :withItemSpacing(TOOL_SPACING)
+        :withPosition(TOOL_MARGIN, topMenuBar:getHeight() + TOOL_MARGIN)
+
+    local toggle = circleButton(toggleCloseIcon, TOGGLE_BUTTON_SIZE, TOGGLE_ICON_SIZE, {
+        default = panels.toolToggle,
+        hover = panels.toolToggleHover,
+        press = panels.toolTogglePress,
+    })
+    toggle:withOnPress(function() toolBar:toggle() end)
+    toolBar:withToggle(toggle)
+
+    -- Keyed by tool name rather than a plain list: the only thing done with these
+    -- afterwards is asking "is your tool the active one", which is a name comparison.
+    toolButtons = {}
+    for _, tool in ipairs(Tools:list()) do
+        local button = circleButton(love.graphics.newImage(tool.icon),
+            TOOL_BUTTON_SIZE, TOOL_ICON_SIZE, {
+                default = panels.tool,
+                hover = panels.toolHover,
+                press = panels.toolPress,
+            })
+            :withSelectedPanel(panels.toolSelected)
+            :withSelectedStatePanel(Button.HOVER, panels.toolSelectedHover)
+            :withSelectedColor("toolIconSelected")
+            :withOnPress(function() Tools:setActive(tool.name) end)
+
+        toolButtons[tool.name] = button
+        toolBar:addItem(button)
+    end
+end
+
+-- Pushed every frame rather than set on press: a tool can also be chosen by keyboard
+-- shortcut or reset by Escape (see Board:keypressed), and the button that lights up
+-- has to be the active tool's whichever way it was picked.
+local function updateToolBar(dt)
+    for name, button in pairs(toolButtons) do
+        button:withSelected(Tools:isActive(name))
+    end
+
+    toolBar:getToggle().label:withIcon(
+        toolBar:isExpanded() and toggleCloseIcon or toggleOpenIcon)
+
+    toolBar:update(dt)
 end
 
 local mousePositionLabel
 local selectionCountLabel
 local fileNameLabel
+local zoomLabel
 
 local function buildStatusBar()
-    local refreshIcon = love.graphics.newImage("res/img/icon/refresh_icon.png")
-
     fileNameLabel = barLabel("Untitled", "foreground")
 
     mousePositionLabel = barLabel("X: 0, Y: 0", "muted")
@@ -173,6 +295,10 @@ local function buildStatusBar()
 
     selectionCountLabel = barLabel("0 Selected", "muted")
 
+    -- Zoom is now reachable from the keyboard and the View menu, neither of which is
+    -- attached to a pointer position, so it needs a readout to land on.
+    zoomLabel = barLabel("100%", "muted")
+
     statusBar = MenuBar.new()
         :withPanel(panels.bar)
         :withPadding(12, 4)
@@ -181,7 +307,7 @@ local function buildStatusBar()
         :addLeftItem(fileNameLabel)
         :addLeftItem(mousePositionLabel)
         :addLeftItem(selectionCountLabel)
-        :addRightItem(barIconButton(refreshIcon):withOnPress(function() print("Refresh pressed!") end))
+        :addRightItem(zoomLabel)
 
     statusBar:withPosition(0, love.graphics.getHeight() - statusBar:getHeight())
 end
@@ -195,10 +321,12 @@ local function updateStatusBar()
     local mouseX, mouseY = love.mouse.getPosition()
     local worldX = Canvas:screenToWorldX(mouseX)
     local worldY = Canvas:screenToWorldY(mouseY)
-    mousePositionLabel:withText(("X: %.2f, Y: %.2f"):format(worldX/100, worldY/100))
+    mousePositionLabel:withText(("X: %.2f, Y: %.2f"):format(worldX, worldY))
 
     local count = Board:getSelection():count()
     selectionCountLabel:withText(("%d Selected"):format(count))
+
+    zoomLabel:withText(("%d%%"):format(math.floor(Canvas.zoom * 100 + 0.5)))
 end
 
 function UI:load()
@@ -208,8 +336,10 @@ function UI:load()
     buildPanels()
     buildTopMenuBar()
     buildStatusBar()
+    -- After the menu bar: the palette hangs below it, so it needs its height.
+    buildToolBar()
 
-    layers = { topMenuBar, statusBar }
+    layers = { topMenuBar, statusBar, toolBar }
     for _, menu in ipairs(menus) do
         table.insert(layers, menu)
     end
@@ -220,6 +350,7 @@ function UI:load()
     -- POPUP outranks CHROME so an open menu sees clicks before the bar behind it.
     InputManager:subscribeAll(InputManager.MOUSE_EVENTS, topMenuBar, InputManager.PRIORITY.CHROME)
     InputManager:subscribeAll(InputManager.MOUSE_EVENTS, statusBar, InputManager.PRIORITY.CHROME)
+    InputManager:subscribeAll(InputManager.MOUSE_EVENTS, toolBar, InputManager.PRIORITY.CHROME)
     for _, menu in ipairs(menus) do
         InputManager:subscribeAll(InputManager.MOUSE_EVENTS, menu, InputManager.PRIORITY.POPUP)
     end
@@ -244,6 +375,11 @@ function UI:isPointOverUI(x, y)
     if statusBar:containsPoint(x, y) then
         return true
     end
+    -- The palette is a column of separate circles, not a strip: its containsPoint is
+    -- true only over a button, so the gaps between them stay canvas.
+    if toolBar:containsPoint(x, y) then
+        return true
+    end
     for _, menu in ipairs(menus) do
         if menu.visible and menu:containsPoint(x, y) then
             return true
@@ -257,6 +393,7 @@ end
 
 function UI:update(dt)
     updateStatusBar()
+    updateToolBar(dt)
     ToastManager:update(dt)
 end
 

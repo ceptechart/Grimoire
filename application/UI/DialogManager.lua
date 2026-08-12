@@ -13,7 +13,7 @@ local Dialog = require "application.UI.Elements.Dialog"
 -- theme instead of the OS's.
 local DialogManager = {}
 
-local FADE_DURATION = 0.15
+local FADE_DURATION = 0.5
 local SLIDE_DISTANCE = 12
 
 function DialogManager:load()
