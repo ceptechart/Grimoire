@@ -1,3 +1,4 @@
+local utf8 = require "utf8"
 local Theme = require "application.Style.Theme"
 local Panel = require "application.Style.Panel"
 local Clip = require "application.Style.Clip"
@@ -18,6 +19,25 @@ local DEFAULT_HEIGHT = 160
 local MIN_WIDTH = 160
 local MIN_HEIGHT = HEADER_HEIGHT + 48
 
+-- The type icon sits in the header's top-right corner, the same image the tool
+-- palette uses for this element's creating tool -- so a panel reads as what it is
+-- without opening it. Reserved on every type alike (see titleRect), which is what
+-- keeps the title box and the icon from needing to know about each other's size.
+local ICON_SIZE = 16
+local ICON_PADDING = 6
+
+-- Loaded lazily (not at require time, love.graphics may not exist yet) and shared
+-- across every element of a given type, the same cache Toast keeps for its icons.
+local iconCache = {}
+local function iconFor(path)
+    local icon = iconCache[path]
+    if not icon then
+        icon = love.graphics.newImage(path)
+        iconCache[path] = icon
+    end
+    return icon
+end
+
 -- The colors one panel-shaped element type draws itself in. A style is built once per
 -- type rather than per element, like the UI's chrome panels: it carries style, not
 -- position, and is drawn into whatever rect it's handed.
@@ -26,7 +46,7 @@ local MIN_HEIGHT = HEADER_HEIGHT + 48
 -- colors -- the header strip, the title clipping, the resize zones -- is identical
 -- across rectangular types, so a type that only wants to look different reuses
 -- drawFrame with a style of its own rather than copying it.
-function PanelElement.newStyle(surface, header, border)
+function PanelElement.newStyle(surface, header, border, icon)
     return {
         panel = Panel.new()
             :withColor(surface)
@@ -34,10 +54,12 @@ function PanelElement.newStyle(surface, header, border)
             :withShadow(true),
         header = header,
         border = border,
+        icon = icon,
     }
 end
 
-local DEFAULT_STYLE = PanelElement.newStyle("elementSurface", "elementHeader", "elementBorder")
+local DEFAULT_STYLE = PanelElement.newStyle("elementSurface", "elementHeader", "elementBorder",
+    "res/img/tool/panel.png")
 
 function PanelElement.defaultSize()
     return DEFAULT_WIDTH, DEFAULT_HEIGHT
@@ -59,9 +81,10 @@ end
 -- describe it to the inline editor, so the text doesn't shift when editing starts.
 -- Returns values rather than a table: this runs in draw, once per panel per frame.
 local function titleRect(element)
+    local reserved = ICON_PADDING + ICON_SIZE + ICON_PADDING
     return element.x + TITLE_PADDING,
         element.y + TITLE_INSET,
-        math.max(0, element.width - TITLE_PADDING * 2),
+        math.max(0, element.width - TITLE_PADDING - reserved),
         HEADER_HEIGHT - TITLE_INSET * 2
 end
 
@@ -101,6 +124,28 @@ function PanelElement.hitTestHandle(element, x, y, zoom)
     return nil
 end
 
+-- Cuts text to fit width, appending an ellipsis when it had to. Character-by-character
+-- rather than binary search: titles are short enough that this never runs more than a
+-- handful of times, and the simple version can't overshoot a multi-byte character.
+local ELLIPSIS = "..."
+local function truncate(font, text, width)
+    if font:getWidth(text) <= width then
+        return text
+    end
+
+    local ellipsisWidth = font:getWidth(ELLIPSIS)
+    local fitWidth = math.max(0, width - ellipsisWidth)
+    local result = ""
+    for _, codepoint in utf8.codes(text) do
+        local candidate = result .. utf8.char(codepoint)
+        if font:getWidth(candidate) > fitWidth then
+            break
+        end
+        result = candidate
+    end
+    return result .. ELLIPSIS
+end
+
 -- The panel body, header strip and title, in a style's colors. Split out from draw so
 -- a derived type can render the same shape in colors of its own.
 function PanelElement.drawFrame(element, context, style)
@@ -124,6 +169,18 @@ function PanelElement.drawFrame(element, context, style)
         element.x + element.width, element.y + HEADER_HEIGHT)
     love.graphics.setLineWidth(previousLineWidth)
 
+    -- The type icon, top-right of the header -- the same image its creating tool
+    -- uses, so a panel reads as what it is without opening it. Drawn regardless of
+    -- whether the title is mid-edit, since the editor only replaces the title text.
+    if style.icon then
+        local icon = iconFor(style.icon)
+        love.graphics.setColor(Theme:color("elementTitle"):unpacked())
+        love.graphics.draw(icon,
+            element.x + element.width - ICON_PADDING - ICON_SIZE,
+            element.y + (HEADER_HEIGHT - ICON_SIZE) / 2,
+            0, ICON_SIZE / icon:getWidth(), ICON_SIZE / icon:getHeight())
+    end
+
     -- While the title is being edited the editor draws it instead, caret and all --
     -- drawing both would show the old value underneath the new one.
     if not (context.editingId == element.id and context.editingProp == "title") then
@@ -138,9 +195,11 @@ function PanelElement.drawFrame(element, context, style)
         love.graphics.setColor(Theme:color("elementTitle"):unpacked())
 
         -- Clipped to the same rect the editor uses, so a title too long for the panel
-        -- stops at its edge instead of spilling across the board.
+        -- stops at its edge instead of spilling across the board. The text itself is
+        -- pre-truncated with an ellipsis rather than left to the clip to just cut off,
+        -- so a long title reads as shortened rather than as abruptly chopped.
         Clip.push(titleX, titleY, titleWidth, titleHeight)
-        love.graphics.print(element.props.title or "",
+        love.graphics.print(truncate(font, element.props.title or "", titleWidth),
             titleX, titleY + (titleHeight - font:getHeight()) / 2)
         Clip.pop()
 

@@ -1,6 +1,7 @@
 local InputManager = require "application.InputManager"
 local Theme = require "application.Style.Theme"
 local Clip = require "application.Style.Clip"
+local ScrollBar = require "application.Style.ScrollBar"
 local TextEditor = require "application.Text.TextEditor"
 local utf8 = require "utf8"
 
@@ -44,6 +45,9 @@ local FIELD_PADDING_Y = 0
 
 local CARET_BLINK = 0.53
 local SELECT_BUTTON = 1
+-- Lines per wheel notch. Expressed in lines rather than units because a field's
+-- scroll is measured in its own font, which the caller chose.
+local WHEEL_LINES = 3
 
 -- ── Word wrap (multiline fields only) ───────────────────────────────────────
 --
@@ -147,13 +151,17 @@ function TextEditSession:load()
     self.scroll = 0
     self.scrollY = 0
     self.dragging = false
+    self.scrollGrab = nil
+    self.caretAnchor = nil
     self.composition = ""
 
     InputManager:subscribe("keypressed", self, InputManager.PRIORITY.MODAL)
     InputManager:subscribe("textinput", self, InputManager.PRIORITY.MODAL)
     InputManager:subscribe("textedited", self, InputManager.PRIORITY.MODAL)
-    -- Not wheelmoved: zooming or scrolling the thing underneath while a field is open
-    -- is harmless, and the field follows it.
+    -- wheelmoved is claimed only over an open multiline field with somewhere left to
+    -- scroll (see below); everywhere else it falls through, so zooming the canvas
+    -- under an open field still works and the field follows it.
+    InputManager:subscribe("wheelmoved", self, InputManager.PRIORITY.MODAL)
     InputManager:subscribe("mousepressed", self, InputManager.PRIORITY.MODAL)
     InputManager:subscribe("mousemoved", self, InputManager.PRIORITY.MODAL)
     InputManager:subscribe("mousereleased", self, InputManager.PRIORITY.MODAL)
@@ -191,6 +199,10 @@ function TextEditSession:begin(request)
     self.scroll = 0
     self.scrollY = 0
     self.dragging = false
+    -- nil rather than the caret's current value, so the first update still scrolls
+    -- the field to show it (see updateScrollY).
+    self.caretAnchor = nil
+    self.scrollGrab = nil
     self.composition = ""
     self:updateTextInput()
 
@@ -251,6 +263,7 @@ function TextEditSession:finish()
     self.request = nil
     self.editor = nil
     self.dragging = false
+    self.scrollGrab = nil
     self.composition = ""
     self:updateTextInput()
     return request, editor
@@ -433,19 +446,53 @@ end
 -- Same idea, vertically: keeps the caret's wrapped line inside the field's height.
 -- Wrapping already keeps every line inside the width, so there's no horizontal
 -- counterpart to this in multiline mode.
+--
+-- The caret is only chased when it has actually *moved*, though -- otherwise the
+-- scrollbar would be unusable, since every frame would drag the view straight back
+-- to wherever the caret was left. Reading somewhere else in a long note and then
+-- typing snaps back to the caret, which is what every editor does and what the
+-- caret moving is the signal for.
 function TextEditSession:updateScrollY(height)
     local font = self:getFont()
     local lineHeight = font:getHeight()
     local lines = self:getLines()
-    local lineIndex = lineAt(lines, self.editor:getCaret())
+    local caret = self.editor:getCaret()
+    local lineIndex = lineAt(lines, caret)
     local caretY = (lineIndex - 1) * lineHeight
 
     local maxScroll = math.max(0, #lines * lineHeight - height)
     local scroll = math.min(self.scrollY, maxScroll)
-    scroll = math.min(scroll, caretY)
-    scroll = math.max(scroll, caretY - height + lineHeight)
+
+    -- nil on the first pass of a new session, so opening a field still starts by
+    -- showing its caret.
+    if self.caretAnchor ~= caret then
+        scroll = math.min(scroll, caretY)
+        scroll = math.max(scroll, caretY - height + lineHeight)
+        self.caretAnchor = caret
+    end
 
     self.scrollY = math.max(0, math.min(scroll, maxScroll))
+end
+
+-- The field's own scrollbar: the wrapped text is the content, the field rect is the
+-- window. Nil for a single-line field or one whose text fits.
+--
+-- Shares nothing with ContentScroll but the bar itself (see Style/ScrollBar) -- the
+-- offset here is the session's, driven by the caret, and belongs to the edit rather
+-- than to the element underneath it.
+function TextEditSession:getScrollBar()
+    if not self.editor or not self.request.multiline then
+        return nil
+    end
+
+    local x, y, width, height = self:getRect()
+    if not x then
+        return nil
+    end
+
+    local font = self:getFont()
+    return ScrollBar.metrics(x, y, width, height,
+        #self:getLines() * font:getHeight(), self.scrollY)
 end
 
 function TextEditSession:update(dt)
@@ -605,6 +652,11 @@ function TextEditSession:drawIn(space)
 
     Clip.pop()
 
+    -- Over the text and outside its clip, the same way an element draws its own
+    -- (see Canvas/ContentScroll). Nil -- and so a no-op -- for a single-line field
+    -- or one whose text fits.
+    ScrollBar.draw(self:getScrollBar(), self.scrollGrab ~= nil)
+
     love.graphics.setLineWidth(previousLineWidth)
     love.graphics.setFont(previousFont)
     love.graphics.setColor(r, g, b, a)
@@ -695,6 +747,20 @@ function TextEditSession:mousepressed(x, y, button, istouch, presses)
 
     if button == SELECT_BUTTON and self:containsPoint(x, y) then
         local localX, localY = self.request.space.toLocal(x, y)
+
+        -- The bar is checked before the caret, since it's drawn over the text and a
+        -- press on it means the bar rather than the character underneath it. Held
+        -- in the session rather than as a Board gesture: a field is MODAL and owns
+        -- the pointer for as long as it's open, so there's no gesture slot to
+        -- compete for and nothing else that could be mid-drag.
+        local bar = self:getScrollBar()
+        if ScrollBar.containsPoint(bar, localX, localY) then
+            self.scrollGrab = ScrollBar.grabFor(bar, localY)
+            self.scrollY = ScrollBar.offsetFor(bar, localY, self.scrollGrab)
+            self:touch()
+            return true
+        end
+
         if presses and presses >= 2 then
             self.editor:selectAll()
         else
@@ -713,22 +779,69 @@ function TextEditSession:mousepressed(x, y, button, istouch, presses)
 end
 
 function TextEditSession:mousemoved(x, y, dx, dy, istouch)
-    if not self.dragging or not self.editor then
+    if not self.editor then
         return false
     end
 
     local localX, localY = self.request.space.toLocal(x, y)
+
+    if self.scrollGrab then
+        local bar = self:getScrollBar()
+        if bar then
+            self.scrollY = ScrollBar.offsetFor(bar, localY, self.scrollGrab)
+        end
+        return true
+    end
+
+    if not self.dragging then
+        return false
+    end
+
     self.editor:setCaret(self:indexAt(localX, localY), true)
     self:touch()
     return true
 end
 
 function TextEditSession:mousereleased(x, y, button, istouch, presses)
-    if not self.dragging or button ~= SELECT_BUTTON then
+    if button ~= SELECT_BUTTON or not (self.dragging or self.scrollGrab) then
         return false
     end
 
     self.dragging = false
+    self.scrollGrab = nil
+    return true
+end
+
+-- The wheel scrolls the open field, which is the one thing on screen the pointer is
+-- actually addressing while a field is open.
+--
+-- Deliberately narrow: only over the field, and only when it has a bar to move.
+-- Anywhere else it isn't consumed, so zooming the canvas under an open field still
+-- works -- which is what the comment in load() used to say about not subscribing to
+-- this at all.
+--
+-- A field that *does* have a bar keeps the wheel at either end of its text, for the
+-- same reason an element does (see Canvas/ContentScroll.wheel): hitting the bottom
+-- of a note shouldn't hand the next notch to the canvas zoom.
+function TextEditSession:wheelmoved(dx, dy)
+    if not self.editor or dy == 0 then
+        return false
+    end
+
+    local mouseX, mouseY = love.mouse.getPosition()
+    if not self:containsPoint(mouseX, mouseY) then
+        return false
+    end
+
+    local bar = self:getScrollBar()
+    if not bar then
+        return false
+    end
+
+    local step = self:getFont():getHeight() * WHEEL_LINES
+    self.scrollY = math.max(0, math.min(self.scrollY - dy * step, bar.maxOffset))
+    -- The caret hasn't moved, so updateScrollY must not pull the view back to it.
+    self.caretAnchor = self.editor:getCaret()
     return true
 end
 

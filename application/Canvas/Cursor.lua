@@ -18,6 +18,9 @@ local HANDLE_CURSORS = {
     ["resize-nw"] = "sizenwse",
     ["resize-se"] = "sizenwse",
     ["text"]      = "ibeam",
+    -- Not a drag handle either: what a type reports under an idle pointer through
+    -- ElementRegistry:hover -- a link in a markdown element's rendered body.
+    ["link"]      = "hand",
     -- Not a hit-tested handle: the pointer state a creation tool holds over the whole
     -- canvas, since there's nothing under the pointer for it to depend on.
     ["create"]    = "crosshair",

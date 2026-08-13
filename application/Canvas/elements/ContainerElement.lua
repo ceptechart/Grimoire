@@ -52,7 +52,8 @@ local MIN_HEIGHT = PanelElement.getHeaderHeight() + PADDING * 2 + 80
 
 -- A darker body than a plain panel's, so the children sitting on it read as raised
 -- tiles on a tray rather than as one continuous surface.
-local STYLE = PanelElement.newStyle("containerSurface", "containerHeader", "containerBorder")
+local STYLE = PanelElement.newStyle("containerSurface", "containerHeader", "containerBorder",
+    "res/img/tool/container.png")
 
 local EMPTY_HINT = "Drag elements here"
 

@@ -24,7 +24,7 @@ local DEFAULT_HEIGHT = 240
 local MIN_WIDTH = 120
 local MIN_HEIGHT = PanelElement.getHeaderHeight() + 60
 
-local STYLE = PanelElement.newStyle("elementSurface", "elementHeader", "elementBorder")
+local STYLE = PanelElement.newStyle("elementSurface", "elementHeader", "elementBorder", "res/img/tool/image.png")
 
 -- name -> extension, the same shape BoardFile's own FILTERS use (see
 -- love.window.showFileDialog's `filters` setting) -- one entry per extension rather

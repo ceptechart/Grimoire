@@ -24,10 +24,6 @@ Tools.SELECT = "select"
 --   icon        path to the button image
 --   shortcut    optional single key that selects this tool
 --   createType  optional element type this tool drags out (see CreateGesture)
---   connectType optional element type this tool connects two elements with (see
---               LineGesture) -- mutually exclusive with createType: unlike a plain
---               create, the press has to land on an element already, since a
---               connector means nothing without two elements to join.
 local definitions = {
     {
         name = Tools.SELECT,
@@ -38,13 +34,6 @@ local definitions = {
     {
         -- The tool name and the element type happen to match here; they're separate
         -- fields because they won't always (a "sticky note" tool making a "note").
-        name = "panel",
-        label = "Panel",
-        icon = "res/img/tool/panel.png",
-        shortcut = "p",
-        createType = "panel",
-    },
-    {
         name = "container",
         label = "Container",
         icon = "res/img/tool/container.png",
@@ -59,18 +48,21 @@ local definitions = {
         createType = "text",
     },
     {
+        -- The other half of the text pair: same panel, same editable body, but the
+        -- body is read as markdown and drawn formatted (see MarkdownElement for
+        -- why that's a second type rather than a flag on the first).
+        name = "markdown",
+        label = "Markdown",
+        icon = "res/img/tool/text_md.png",
+        shortcut = "m",
+        createType = "markdown",
+    },
+    {
         name = "image",
         label = "Image",
         icon = "res/img/tool/image.png",
         shortcut = "i",
         createType = "image",
-    },
-    {
-        name = "line",
-        label = "Line",
-        icon = "res/img/tool/line.png",
-        shortcut = "l",
-        connectType = "line",
     },
 }
 

@@ -124,6 +124,10 @@ buffer, the session, and the field descriptors element types publish.
       window, so that's the part to watch.
 - [ ] Double-click currently only opens the *first* field under the pointer and there's no
       Tab between fields; both matter once an element type has more than one.
+- [x] A double-click now asks the element type (`handleDoubleClick`) *before* looking for
+      a text field, so a type can claim a point its own field's `hit` region covers —
+      which is what lets a markdown element follow a link inside a body field that spans
+      the whole element. A type that declines falls through to the fields unchanged.
 
 ---
 
@@ -169,31 +173,60 @@ palette and gives it `CreateGesture` for free. `PanelElement` is the template;
 `RectResize` is already shared for anything rectangular.
 
 - [ ] **Note / sticky** — body text, wraps, no header. Needs §3's remaining multi-line
-      work; the single-line editor and `textFields` hook are in.
+      work; the single-line editor and `textFields` hook are in. (`TextElement` is the
+      headered version of this and now scrolls when its body outgrows it — see the
+      Markdown entry below for the shared machinery.)
+- [x] **Markdown** — a second text type (`elements/MarkdownElement.lua`) whose body is
+      markdown source, edited raw in the monospace font and drawn formatted. Split into
+      `application/Text/Markdown.lua` (pure parser, no `love`) and
+      `MarkdownLayout.lua` (measuring and draw items), so the parser is testable
+      headlessly and the renderer has one job. Covers headings, bold/italic/both,
+      strikethrough, `==highlight==`, `~subscript~`, `^superscript^`, inline and fenced
+      code, blockquotes (nesting), ordered/unordered/task lists (nesting), tables with
+      per-column alignment, thematic breaks, and links — labelled, unlabelled, autolinked
+      and bare. Links open on double-click, restricted to http/https/mailto, and light
+      up in `markdownLinkHover` under the hand cursor when the pointer is over one —
+      through `ElementRegistry:hover`, so the next type that wants an affordance
+      inside itself implements one hook rather than teaching `Board` about it. Two
+      deliberate departures from CommonMark, both for the sake of typing into a panel:
+      a newline in the source is a line break (no trailing-whitespace syntax), and a
+      heading needs no space after its hashes. See CLAUDE.md's "Markdown" section.
+  - [ ] Not parsed, each deliberately: setext headings, reference-style links, indented
+        (non-fenced) code blocks, raw HTML, footnotes. Unrecognised syntax falls through
+        as literal text rather than being dropped, so adding one later is additive.
+  - [x] Content taller than the element scrolls, by wheel or by dragging a proportional
+        bar — shared with the note type through `application/Canvas/ContentScroll.lua`
+        (a type answers `scrollView` and offsets its own drawing; everything else is
+        generic). The wheel doesn't fight `Canvas:wheelmoved`: `Board` is at a higher
+        priority and simply declines the event when there's nothing left to scroll, so
+        the zoom takes it. See CLAUDE.md's "Scrolling inside an element".
+    - [x] The inline editor scrolls too, with the same bar (`application/Style/ScrollBar.lua`
+          is the shared geometry; the offsets stay separate, since the field's is driven
+          by its caret and the element's isn't). `updateScrollY` now chases the caret only
+          when the caret has actually moved, without which a field's own bar is unusable.
+    - [ ] The two offsets don't hand off: committing an edit leaves the element showing
+          wherever *it* was scrolled to, not where the field was. Only noticeable on a
+          long note, and picking a rule (follow the caret? keep the element's?) is the
+          open part, not the plumbing.
+    - [ ] No keyboard scrolling — PageUp/Down and Ctrl+Home/End reach `TextEditor`, which
+          treats them as caret motions, and nothing scrolls a *closed* element from the
+          keyboard at all.
+    - [ ] Horizontal scrolling doesn't exist, which is what a long code-block line
+          would need (see below).
+  - [ ] Long code-block lines run under the clip rather than wrapping (deliberate — code
+        means its indentation), so they're simply cut off. Horizontal scroll or a soft
+        wrap marker is the fix if it bites.
+  - [ ] Images (`![alt](url)`) parse as links showing their alt text. Actually showing a
+        remote picture is a fetch this app doesn't do; a relative path could reuse
+        `ImageElement`'s loader and `lib/util/Path.lua`.
 - [ ] **Card** — title + tags + optional checkbox list; the Trello-ish unit.
 - [ ] **Text label** — no background, size follows the text.
 - [ ] **Image** — needs a decision on whether the file is referenced by relative path
       (git-friendly, matches the local-first goal) or embedded.
-- [x] **Connector / line** — anchored to two elements rather than being a free rect, in
-      `application/Canvas/elements/LineElement.lua`. Not a `PanelElement` derivative:
-      what's stored is relative (`fromId`/`toId`, plus each end's side-of-rect and
-      fraction along it), and the endpoints themselves are derived every frame by
-      `ElementRegistry:updateGeometry` (dispatched from `Board:update`, after
-      `Containment.layoutAll`) the same way a container's child rect is — so a resize
-      or drag re-routes it for free. Selecting it recolors the stroke itself
-      (`ownSelectionColor` opts a type out of the generic bounding-box outline, which
-      would otherwise span the whole diagonal) rather than drawing an outline, since
-      the stroke *is* the whole visible element. Hit testing is point-to-segment
-      distance rather than the rect-based default. Made with a new `connectType` tool
-      field (`LineGesture`, alongside `createType`'s `CreateGesture`) — the press has
-      to land on a real element rather than owning the whole canvas the way a create
-      does, since a connector means nothing without two elements to join. Deleting
-      either endpoint cascades to the line via a new `ElementRegistry:dependsOn` hook,
-      the mirror image of a container's `childIds` gathering its own delete.
-  - [ ] No way to re-aim an existing line's endpoints after creation, or to add a label
-        to it (`textFields` isn't implemented).
-  - [ ] Copying one of the two panels a line connects doesn't bring the line along,
-        unlike a container and its children.
+- [ ] **Connector / link** — the Twine-ish piece, and the one that stresses the model:
+      it's anchored to two elements rather than being a free rect, so it needs endpoint
+      references, re-routing when an endpoint moves, non-rect hit testing, and a rule for
+      what happens when an endpoint element is deleted. Design it before building it.
 - [x] **Container** — a panel that arranges other elements in a recursive split tree
       (`row`/`column` splits down to leaves, not a fixed grid — a leaf can be nested
       inside a wrapping split of either direction at any depth), derived from
@@ -326,8 +359,13 @@ See CLAUDE.md's "Testing changes".
       fall-through, resizing a container by its own edge without it jumping in front
       of its children, deleting a container cascading to its contents and undoing back
       to the exact arrangement, a container through copy/paste (id remapping), and a
-      hand-broken `layout` opening rather than crashing. Plus six screenshot passes
-      for the things only a human can check.
+      hand-broken `layout` opening rather than crashing. Plus screenshot passes
+      for the things only a human can check. The markdown block asserts at the layer
+      each piece lives at: the parser directly (one assertion per piece of syntax,
+      since the failure mode is silently rendering markup as literal text), the layout
+      through the real fonts, and the element through synthetic double-clicks — link
+      following included, with `love.system.openURL` stubbed so a run can't open a
+      browser.
 - [ ] Headless unit tests for the pure modules (`History`, `Document`, `Selection`, the
       commands, the serializer). They don't need a window — but they do need a Lua
       interpreter on PATH, which the current setup doesn't have, so for now they run
@@ -408,12 +446,8 @@ Worth settling before the code that depends on them gets written.
    keys and rounded numbers. Per-element files would merge better in git, but they're
    worse to hand-edit and slower to load; revisit only if merge pain shows up in
    practice. Rationale is in CLAUDE.md.
-2. ~~**Connectors**~~ — settled: an element in the same list (`LineElement`), not a
-   separate relation table — storing `fromId`/`toId` in props keeps selection, undo,
-   copy/paste id-remapping and the save format working on it unchanged, the same
-   argument that settled containers holding their children as ordinary elements
-   rather than nested data. Deletion rule is `ElementRegistry:dependsOn`: removing
-   either endpoint cascades to the line. See §5.
+2. **Connectors**: are they elements in the same list (needing endpoint references and a
+   deletion rule), or a separate relation table in the document?
 3. **Scope of "board"**: one file per board, or one file holding multiple named boards/tabs?
    This decides whether `Board` stays a singleton.
 4. **Coordinate units**: the status bar's unexplained `/100` divisor is gone, so nothing

@@ -36,6 +36,35 @@ return {
         containerHeader  = 0x323238, -- title bar strip
         containerBorder  = 0x4A4A52, -- container outline
 
+        -- MarkdownElement.lua / MarkdownLayout.lua: the formatted body of a
+        -- markdown element. Its own group rather than reuses of `foreground` and
+        -- friends, because a rendered document has distinctions the chrome doesn't
+        -- -- a heading against body text, a quotation against the thing quoting it
+        -- -- and a Light theme has to be free to make them differently.
+        markdownText        = 0xD4D4D4, -- body text, list items, table cells
+        markdownHeading     = 0xF0F0F0, -- headings, brighter than body text
+        markdownLink        = 0x6AA9F4, -- link text and its underline; also a checked task box
+        markdownLinkHover   = 0xA6CBFB, -- the same, for the link the pointer is over
+        markdownBullet      = 0x8A8A8A, -- list bullets, ordered numbers, task box outline
+        markdownRule        = 0x3C3C3C, -- thematic breaks, and the rule under an h1/h2
+        markdownQuoteBar    = 0x5A6270, -- the vertical bar down the left of a blockquote
+        markdownQuoteText   = 0xA8A8A8, -- quoted text, dimmer than the text around it
+        markdownCodeText    = 0xCE9178, -- inline code and code block contents
+        markdownCodeSurface = 0x1B1B1F, -- fill behind a code block *and* behind inline code
+        markdownHighlight     = 0xE0C77E, -- fill behind ==highlighted== text
+        markdownHighlightText = 0x1B1B1F, -- highlighted text itself, dark enough to read on it
+        markdownCodeBorder  = 0x3C3C3C, -- code block outline
+        markdownTableBorder = 0x4A4A52, -- table grid lines
+        markdownTableHeader = 0x2F2F35, -- fill behind a table's header row
+
+        -- ContentScroll.lua: the scrollbar an element draws over its own content
+        -- when that content is taller than it is. Translucent rather than solid,
+        -- because it overlays the text rather than sitting in a gutter beside it --
+        -- see ContentScroll's header for why there's no gutter.
+        scrollTrack       = { 0xFFFFFF, 0.05 }, -- the groove, full height of the content window
+        scrollThumb       = { 0xFFFFFF, 0.22 }, -- the draggable part, sized to the content
+        scrollThumbActive = { 0xFFFFFF, 0.40 }, -- while it's being dragged
+
         -- MoveGesture.lua: the slot a dragged element would land in, previewed while
         -- the pointer is over a container.
         dropTargetFill   = { 0x3B82F6, 0.22 },
@@ -88,12 +117,6 @@ return {
         marqueeFill   = { 0x3B82F6, 0.12 }, -- MarqueeGesture -- fill of the drag-to-select rect
         marqueeBorder = { 0x3B82F6, 0.6 },  -- MarqueeGesture -- outline of the drag-to-select rect
 
-        -- LineElement.lua: the connector between two panels. It carries its own
-        -- selection color rather than the generic pulsing outline every other element
-        -- gets, since the stroke itself is the whole element.
-        line         = 0xE0C25E, -- soft yellow, unselected
-        lineSelected = 0x3B82F6, -- same blue as the rest of the app's selection/accent uses
-
         -- Toast.lua: border + icon + label tint for each toast type
         -- (Toast.SUCCESS/INFO/WARN/ERROR). toastWarn doubles as UnknownElement's
         -- border color (see elementBorder above).
@@ -107,9 +130,38 @@ return {
 
     -- `family` is a path to a font file; omit it to use LOVE's built-in font.
     fonts = {
-        small  = { family = "res/fnt/ubuntu.ttf", size = 14 },
-        medium = { family = "res/fnt/ubuntu.ttf", size = 20 },
-        large  = { family = "res/fnt/ubuntu.ttf", size = 26 },
+        code    = { family = "res/fnt/jetbrainsmono.ttf", size = 16 },
+        label = { family = "res/fnt/ramabhadra.ttf", size = 32},
+
+        -- One step below `small`, so a markdown sub/superscript has somewhere to go
+        -- (MarkdownLayout's SMALLER table walks this scale). Nothing else uses it.
+        tiny    = { family = "res/fnt/nunito.ttf", size = 11 },
+        small   = { family = "res/fnt/nunito.ttf", size = 16 },
+        medium  = { family = "res/fnt/nunito.ttf", size = 20 },
+        large   = { family = "res/fnt/nunito.ttf", size = 24 },
+        xlarge  = { family = "res/fnt/nunito.ttf", size = 28 },
+        xxlarge = { family = "res/fnt/nunito.ttf", size = 32 },
+
+        tiny_italic    = { family = "res/fnt/nunito_italic.ttf", size = 11 },
+        small_italic   = { family = "res/fnt/nunito_italic.ttf", size = 16 },
+        medium_italic  = { family = "res/fnt/nunito_italic.ttf", size = 20 },
+        large_italic   = { family = "res/fnt/nunito_italic.ttf", size = 24 },
+        xlarge_italic  = { family = "res/fnt/nunito_italic.ttf", size = 28 },
+        xxlarge_italic = { family = "res/fnt/nunito_italic.ttf", size = 32 },
+
+        tiny_bold    = { family = "res/fnt/nunito_bold.ttf", size = 11 },
+        small_bold   = { family = "res/fnt/nunito_bold.ttf", size = 16 },
+        medium_bold  = { family = "res/fnt/nunito_bold.ttf", size = 20 },
+        large_bold   = { family = "res/fnt/nunito_bold.ttf", size = 24 },
+        xlarge_bold  = { family = "res/fnt/nunito_bold.ttf", size = 28 },
+        xxlarge_bold = { family = "res/fnt/nunito_bold.ttf", size = 32 },
+
+        tiny_bold_italic    = { family = "res/fnt/nunito_bold_italic.ttf", size = 11 },
+        small_bold_italic   = { family = "res/fnt/nunito_bold_italic.ttf", size = 16 },
+        medium_bold_italic  = { family = "res/fnt/nunito_bold_italic.ttf", size = 20 },
+        large_bold_italic   = { family = "res/fnt/nunito_bold_italic.ttf", size = 24 },
+        xlarge_bold_italic  = { family = "res/fnt/nunito_bold_italic.ttf", size = 28 },
+        xxlarge_bold_italic = { family = "res/fnt/nunito_bold_italic.ttf", size = 32 }
     },
 
     metrics = {

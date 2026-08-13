@@ -10,9 +10,15 @@ local Element = require "application.Canvas.Element"
 --   draw(element, context)         context carries { zoom }
 --   hitTest(element, x, y)               optional, defaults to the element's rect
 --   hitTestHandle(element, x, y, zoom)   optional, returns a handle name or nil
+--   hover(element, x, y)                 optional, -> what an idle pointer is over
+--                                        inside this element, and the cursor for it
+--                                        (see hover below)
 --   minSize()                            optional, -> minWidth, minHeight for resize
 --   textFields(element)                  optional, -> the editable text on this
 --                                        element (see textFields below)
+--   scrollView(element)                  optional, -> the window onto this element's
+--                                        content and how tall that content is
+--                                        (see scrollView below)
 --
 -- A type that holds other elements implements a further optional group, dispatched
 -- generically by application/Canvas/Containment.lua so nothing outside that module
@@ -160,23 +166,71 @@ function ElementRegistry:textField(element, prop)
     return nil
 end
 
--- Double-clicking a spot on an element that isn't one of its text fields -- an
--- image's body, say, rather than its title. `setProp(values)` lets the type record
+-- A type's own answer to a double-click: opening a file picker over an image's
+-- body, following a link in a markdown element's rendered text.
+--
+-- Board asks this *before* it looks for a text field, and the type declines (false)
+-- for anything it doesn't claim. That way round because this answer is
+-- point-specific and a text field's hit region is not -- a markdown element's
+-- source field covers its whole body, so a field lookup that ran first would
+-- swallow every link on it. Nothing is lost by it: a type that wants the field to
+-- win simply returns false for the points the field covers, which is what
+-- ImageElement's content-rect guard already does for its own header.
+--
+-- `setProp(values)` lets the type record
 -- an undoable change without knowing anything about Document or commands; Board
 -- supplies it bound to this element's live id, the same indirection beginTextEdit's
 -- onCommit uses so a callback that fires later (an async file dialog, here) can't
 -- write into a document the element has since left.
 --
 -- Optional, so this is the one dispatch in the "containment" group's shape (see the
--- header) that lives down here instead: every other element type answers false/nil
--- for it implicitly, by not being asked in the first place -- Board only calls this
--- after a text field lookup has already come up empty.
+-- header) that lives down here instead: a type that doesn't implement it declines
+-- every double-click, which is the same thing every element did before this hook
+-- existed.
 function ElementRegistry:handleDoubleClick(element, x, y, setProp)
     local definition = self:resolve(element.type)
     if definition.handleDoubleClick then
         return definition.handleDoubleClick(element, x, y, setProp)
     end
     return false
+end
+
+-- What an idle pointer is over inside an element, for the affordances that aren't
+-- drag handles: `hover(element, x, y)` returns `target, cursor`, where `target` is
+-- whatever the type wants handed back to its own draw (a link id, for the markdown
+-- type) and `cursor` is a Cursor handle name, or nil for neither.
+--
+-- The target is opaque here and in Board, which is the point: Board stores it as
+-- view state beside the selection and puts it on the draw context, so a type gets a
+-- hover highlight without Board learning what a link is, and without the type
+-- reading the mouse behind Board's back -- which would miss every reason Board has
+-- for suppressing hover (a modal, the chrome, an open editor, a gesture in flight).
+--
+-- Deliberately *not* hitTestHandle: what that returns decides what a press starts,
+-- and a link isn't something to drag.
+function ElementRegistry:hover(element, x, y)
+    local definition = self:resolve(element.type)
+    if definition.hover then
+        return definition.hover(element, x, y)
+    end
+    return nil
+end
+
+-- Where an element's scrollable window sits and how tall the content inside it is:
+--
+--   x, y, width, height   the window, in world coordinates
+--   contentHeight         the full height of what's being shown through it
+--
+-- Optional, and nil for a type that doesn't scroll -- application/Canvas/ContentScroll.lua
+-- turns this into an offset, a thumb and a wheel response generically, so a type
+-- implements this one function and offsets its own drawing, and never computes a
+-- scrollbar itself.
+function ElementRegistry:scrollView(element)
+    local definition = self:resolve(element.type)
+    if definition.scrollView then
+        return definition.scrollView(element)
+    end
+    return nil
 end
 
 function ElementRegistry:minSize(elementType)
@@ -266,28 +320,6 @@ function ElementRegistry:remapIds(element, idMap)
     if definition.remapIds then
         definition.remapIds(element, idMap)
     end
-end
-
--- ── Derived geometry and cross-element references ───────────────────────────
---
--- For a type whose geometry depends on another element rather than owning its own
--- (a line connecting two panels): a chance to recompute itself every frame, the same
--- point Containment.layoutAll runs at -- after that frame's input, before its draw.
--- Optional; everything else no-ops here implicitly, by not defining the hook.
-function ElementRegistry:updateGeometry(element, document)
-    local definition = self:resolve(element.type)
-    if definition.updateGeometry then
-        definition.updateGeometry(element, document)
-    end
-end
-
--- The ids of other elements this one's identity depends on -- what should be removed
--- along with it, the same way a container's children are gathered for a delete, but
--- in the opposite direction: a line depends on the panels it connects, not the other
--- way around. nil for anything that doesn't reference another element's id.
-function ElementRegistry:dependsOn(element)
-    local definition = self:resolve(element.type)
-    return definition.dependsOn and definition.dependsOn(element) or nil
 end
 
 return ElementRegistry

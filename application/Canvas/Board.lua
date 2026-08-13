@@ -22,7 +22,8 @@ local ResizeGesture = require "application.Canvas.gestures.ResizeGesture"
 local CellResizeGesture = require "application.Canvas.gestures.CellResizeGesture"
 local MarqueeGesture = require "application.Canvas.gestures.MarqueeGesture"
 local CreateGesture = require "application.Canvas.gestures.CreateGesture"
-local LineGesture = require "application.Canvas.gestures.LineGesture"
+local ScrollGesture = require "application.Canvas.gestures.ScrollGesture"
+local ContentScroll = require "application.Canvas.ContentScroll"
 
 -- The view and controller over a Document: draws its elements through the canvas
 -- transform, turns pointer input into edits, and owns the board's shortcuts.
@@ -41,7 +42,7 @@ ElementRegistry:register(require "application.Canvas.elements.PanelElement")
 ElementRegistry:register(require "application.Canvas.elements.ContainerElement")
 ElementRegistry:register(require "application.Canvas.elements.ImageElement")
 ElementRegistry:register(require "application.Canvas.elements.TextElement")
-ElementRegistry:register(require "application.Canvas.elements.LineElement")
+ElementRegistry:register(require "application.Canvas.elements.MarkdownElement")
 ElementRegistry:setFallback(require "application.Canvas.elements.UnknownElement")
 
 local DRAG_BUTTON = 1
@@ -125,6 +126,8 @@ function Board:setDocument(document)
     self.document = document
     self.selection:clear()
     self.gesture = nil
+    -- Names an element in the outgoing document, the same as the two above.
+    self:setHover(nil, nil)
 end
 
 -- ── Selection edits ──────────────────────────────────────────────────────
@@ -157,22 +160,6 @@ function Board:deleteSelection(showToast)
     local toRemove = {}
     for _, id in ipairs(Containment.withDescendants(self.document, selected)) do
         toRemove[id] = true
-    end
-
-    -- Anything whose identity depends on something being removed goes too -- a line
-    -- loses its meaning the instant either panel it connects is gone, the same way a
-    -- container's children are gathered above, just in the opposite direction (see
-    -- ElementRegistry:dependsOn). One pass is enough: nothing currently depends on a
-    -- line, so there's no chain to walk.
-    for _, element in ipairs(self.document.elements) do
-        if not toRemove[element.id] then
-            for _, dependencyId in ipairs(ElementRegistry:dependsOn(element) or {}) do
-                if toRemove[dependencyId] then
-                    toRemove[element.id] = true
-                    break
-                end
-            end
-        end
     end
 
     local ids = {}
@@ -357,13 +344,6 @@ function Board:update(dt)
     -- out follows the container that was just dragged, undone, resized or opened out
     -- of a file -- none of which needs to know that anything is laid out at all.
     Containment.layoutAll(self.document)
-
-    -- After Containment's own pass, so a line connecting an element that's itself
-    -- laid out by a container reads that element's already-current rect rather than
-    -- last frame's.
-    for _, element in ipairs(self.document.elements) do
-        ElementRegistry:updateGeometry(element, self.document)
-    end
 end
 
 -- Hoisted rather than closed over the document per call: this runs every frame, and
@@ -405,16 +385,18 @@ function Board:draw()
     -- that -- the element holds ids.
     context.document = self.document
 
-    -- LineElement reads this to pick its own selected/unselected color -- see
-    -- drawSelectionOutlines for why a line doesn't also get the generic outline.
-    context.selection = self.selection
-
     -- Which label, if any, an element type should leave to the inline editor rather
     -- than drawing itself. Read from the session rather than tracked here, so a
     -- commit triggered by a click anywhere can't leave this stale.
     local editing = TextEditSession:getOwner()
     context.editingId = editing and editing.id or nil
     context.editingProp = editing and editing.prop or nil
+
+    -- What the pointer is idling over inside an element, for the types that draw a
+    -- hover state (see setHover). Opaque here: only the type that reported it knows
+    -- what the target means.
+    context.hoverId = self.hoverId
+    context.hoverTarget = self.hoverTarget
 
     love.graphics.push()
     love.graphics.translate(Canvas.offset.x, Canvas.offset.y)
@@ -451,10 +433,7 @@ local pulseColor = Color.new()
 
 -- Drawn generically from each element's rect rather than by the element type
 -- itself, so a new element type is selectable without having to draw its own
--- outline. A type can opt out via `ownSelectionColor` when the outline would be
--- redundant or actively wrong -- a line's whole visible extent is its stroke, so it
--- shows selection by recoloring itself (see LineElement.draw) rather than gaining a
--- diagonal-spanning bounding-box rectangle nothing else on the board has.
+-- outline.
 function Board:drawSelectionOutlines()
     if self.selection:isEmpty() then
         return
@@ -473,7 +452,7 @@ function Board:drawSelectionOutlines()
     local radius = Theme:metric("cornerRadius")
 
     for _, element in ipairs(self.document.elements) do
-        if self.selection:contains(element.id) and not ElementRegistry:resolve(element.type).ownSelectionColor then
+        if self.selection:contains(element.id) then
             love.graphics.rectangle("line",
                 element.x - margin, element.y - margin,
                 element.width + margin * 2, element.height + margin * 2, radius, radius)
@@ -565,19 +544,6 @@ function Board:mousepressed(x, y, button, istouch, presses)
         return true
     end
 
-    -- Same "owns the whole canvas before any hit testing" shape as createType, except
-    -- a connector needs somewhere to start from: a press that doesn't land on a valid
-    -- element is a no-op rather than the start of a gesture, since there'd be nothing
-    -- to connect. Still consumed, so it doesn't fall through to a marquee drag.
-    local connectType = Tools:getActive().connectType
-    if connectType then
-        local fromElement = self.document:elementAt(worldX, worldY)
-        if fromElement and fromElement.type ~= connectType then
-            self.gesture = LineGesture.new(self, connectType, fromElement, worldX, worldY)
-        end
-        return true
-    end
-
     local element, handle = self.document:handleAt(worldX, worldY, Canvas.zoom)
 
     if not element then
@@ -603,23 +569,38 @@ function Board:mousepressed(x, y, button, istouch, presses)
         return true
     end
 
+    -- A press on an element's scrollbar drags it, and nothing else -- not a select,
+    -- not a move. After the resize handles, deliberately: the bar sits just inside
+    -- the element's right edge, and at a low enough zoom the resize zone (6 *screen*
+    -- pixels, so wider in world units the further out you are) reaches it. The
+    -- narrow, precise thing wins there, the same order PanelElement uses for its own
+    -- edges against its header, and the wheel still scrolls regardless.
+    local scrolled, grab = ContentScroll.pressAt(element, worldX, worldY)
+    if scrolled then
+        self.gesture = ScrollGesture.new(self, element, worldX, worldY, grab)
+        return true
+    end
+
     -- Double-click on a label edits it. Checked after the resize handles so a quick
     -- double-click on an edge still resizes, and before the move/select logic so the
     -- second click doesn't start a drag.
     if presses and presses >= 2 then
-        local field = ElementRegistry:textFieldAt(element, worldX, worldY)
-        if field then
-            self.selection:set(element.id)
-            self:beginTextEdit(element, field)
-            return true
-        end
-
-        -- Not a text field: a type gets one more shot at the double-click (an
-        -- image's body, opening the file picker). setProp is bound to the id
-        -- rather than closing over `element` itself, matching beginTextEdit's
-        -- onCommit -- the callback this hands out can fire well after the click,
-        -- from an async file dialog's own callback, by which point undo/redo may
-        -- have moved this element out from under it or dropped it entirely.
+        -- The type gets first refusal on a double-click (an image's body opening
+        -- the file picker, a markdown link being followed), and only what it
+        -- declines falls through to the text fields.
+        --
+        -- This way round because a type's own answer is point-specific and a text
+        -- field's hit region is not: a markdown element's source field covers its
+        -- whole body, so a lookup that ran first would swallow every link on it.
+        -- Nothing is lost the other way -- a type that wants the field to win
+        -- simply returns false for the points the field covers, which is what
+        -- ImageElement's content-rect guard already does for its own header.
+        --
+        -- setProp is bound to the id rather than closing over `element` itself,
+        -- matching beginTextEdit's onCommit: the callback this hands out can fire
+        -- well after the click, from an async file dialog's own callback, by which
+        -- point undo/redo may have moved this element out from under it or dropped
+        -- it entirely.
         local id = element.id
         local handled = ElementRegistry:handleDoubleClick(element, worldX, worldY, function(values)
             local live = self.document:getById(id)
@@ -629,6 +610,13 @@ function Board:mousepressed(x, y, button, istouch, presses)
         end)
         if handled then
             self.selection:set(id)
+            return true
+        end
+
+        local field = ElementRegistry:textFieldAt(element, worldX, worldY)
+        if field then
+            self.selection:set(element.id)
+            self:beginTextEdit(element, field)
             return true
         end
     end
@@ -648,8 +636,48 @@ function Board:mousepressed(x, y, button, istouch, presses)
     return true
 end
 
+-- The wheel scrolls the element under the pointer, if it has anything to scroll,
+-- and otherwise zooms the canvas.
+--
+-- This works by consumption rather than by asking anyone's permission: Board sits at
+-- ELEMENT priority and Canvas at CANVAS, so the wheel reaches here first and only
+-- reaches the zoom when this returns false. "Nothing to scroll" means no scrollbar
+-- at all -- a type that doesn't scroll, or a document that fits. An element showing
+-- a bar keeps the wheel at either end of its content, so running out of note under
+-- the pointer doesn't hand the same gesture over to the canvas zoom.
+--
+-- LOVE hands wheelmoved the scroll amount, not a position, so the pointer is read
+-- from the mouse directly -- the same thing Canvas:wheelmoved does to zoom at the
+-- cursor.
+function Board:wheelmoved(dx, dy)
+    if dy == 0 then
+        return false
+    end
+
+    local mouseX, mouseY = love.mouse.getPosition()
+    local element = self.document:elementAt(
+        Canvas:screenToWorldX(mouseX), Canvas:screenToWorldY(mouseY))
+    if not element then
+        return false
+    end
+
+    -- An open editor is drawing this element's body itself, scrolled to its own
+    -- caret; moving the element's offset underneath it would do nothing now and
+    -- surprise on commit.
+    local editing = TextEditSession:getOwner()
+    if editing and editing.id == element.id then
+        return false
+    end
+
+    return ContentScroll.wheel(element, dy)
+end
+
 function Board:mousemoved(x, y, dx, dy, istouch)
     if self.gesture then
+        -- Nothing on an element is "under the pointer" mid-drag: the pointer is
+        -- committed to the gesture, and a link lighting up under a marquee being
+        -- dragged across it would be inviting a click that can't happen.
+        self:setHover(nil, nil)
         self.gesture:move(Canvas:screenToWorldX(x), Canvas:screenToWorldY(y))
         return true
     end
@@ -658,10 +686,25 @@ function Board:mousemoved(x, y, dx, dy, istouch)
     return false
 end
 
+-- The element, and the thing inside it, an idle pointer is over -- view state in the
+-- same sense Selection is, so it lives here rather than in the document, and it's
+-- handed to element types through the draw context (see draw). The target is opaque:
+-- only the type that produced it knows what it means (see ElementRegistry:hover).
+function Board:setHover(elementId, target)
+    self.hoverId = elementId
+    self.hoverTarget = target
+end
+
 -- Idle hover affordances. Returns nothing useful -- mousemoved is broadcast, so
 -- consuming it wouldn't stop anything anyway; this is only about which cursor the
 -- pointer should be showing.
 function Board:updateHoverCursor(x, y)
+    -- Every early return below is a reason the pointer isn't hovering anything on the
+    -- board, so the hover target goes with the cursor in each of them -- clearing it
+    -- once here is what keeps a highlight from being left lit under a dialog that
+    -- opened over it.
+    self:setHover(nil, nil)
+
     -- A modal dialog owns the pointer everywhere while it's open, not just over its
     -- own rect, so this is a state check rather than a position query like
     -- isPointOverUI below -- same reason TextEditSession gets its own check rather
@@ -689,17 +732,31 @@ function Board:updateHoverCursor(x, y)
     end
 
     -- A creation tool ignores what's under the pointer, so there are no move or
-    -- resize affordances to show -- just the crosshair, everywhere on the canvas. A
-    -- connect tool shows the same crosshair: it needs an element to start from, but
-    -- once started it's no more a move/resize affordance than a create is.
-    if Tools:getActive().createType or Tools:getActive().connectType then
+    -- resize affordances to show -- just the crosshair, everywhere on the canvas.
+    if Tools:getActive().createType then
         Cursor:setForHandle("create")
         return
     end
 
     local worldX = Canvas:screenToWorldX(x)
     local worldY = Canvas:screenToWorldY(y)
-    local _, handle = self.document:handleAt(worldX, worldY, Canvas.zoom)
+    local element, handle = self.document:handleAt(worldX, worldY, Canvas.zoom)
+
+    -- A resize handle wins over anything inside the element, the same order a press
+    -- resolves in and for the same reason the scrollbar yields to one: the grab zone
+    -- is a few screen pixels wide, so the narrow, precise thing takes the point.
+    -- Everywhere else the type gets asked what's under the pointer -- a link in a
+    -- rendered markdown body -- and its cursor stands in for the plain arrow "move"
+    -- and nil would otherwise have shown.
+    if element and (handle == nil or handle == "move") then
+        local target, cursor = ElementRegistry:hover(element, worldX, worldY)
+        if target ~= nil or cursor then
+            self:setHover(element.id, target)
+            Cursor:setForHandle(cursor)
+            return
+        end
+    end
+
     Cursor:setForHandle(handle)
 end
 

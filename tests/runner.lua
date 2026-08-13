@@ -82,6 +82,14 @@ function Runner.drag(x1, y1, x2, y2)
     Runner.release(x2, y2)
 end
 
+-- One wheel notch, positive being up/away. LOVE's wheelmoved carries the amount and
+-- not a position, so a handler that cares where the pointer is reads it from the
+-- real mouse -- which means a test driving this has to set that first, the same way
+-- the paste tests do.
+function Runner.wheel(dy)
+    return InputManager:dispatch("wheelmoved", 0, dy)
+end
+
 function Runner.key(key)
     return InputManager:dispatch("keypressed", key, key, false)
 end
